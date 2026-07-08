@@ -240,3 +240,8 @@ export async function purgeExpiredTrash(uid, trashItems, maxAgeDays = 30) {
 export function saveLists(uid, lists) {
   return updateDoc(doc(db, "users", uid), { lists });
 }
+
+export async function getAo3Credentials(uid) {
+  const snap = await getDoc(doc(db, "users", uid, "private", "ao3Credentials"));
+  return snap.exists() ? snap.data() : null;
+}

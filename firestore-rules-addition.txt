@@ -1,0 +1,29 @@
+Add this nested match inside your existing users/{userId} rule (or confirm
+your current wildcard {document=**} already covers it — it likely does,
+since your existing rule matches all nested documents under a user).
+
+Your CURRENT rule (from the screenshot earlier):
+
+  match /users/{userId}/{document=**} {
+    allow read, write: if request.auth != null && request.auth.uid == userId;
+  }
+
+Good news: because you're using {document=**}, this ALREADY covers a new
+path like users/{userId}/private/ao3Credentials — you don't need to add
+anything. The existing rule already restricts that sub-document to only
+the matching signed-in user.
+
+If you ever want to be extra explicit about it (not required, just for
+readability when someone else reads your rules file later), you could
+add a dedicated rule above the wildcard one:
+
+  match /users/{userId}/private/ao3Credentials {
+    allow read, write: if request.auth != null && request.auth.uid == userId;
+  }
+
+  match /users/{userId}/{document=**} {
+    allow read, write: if request.auth != null && request.auth.uid == userId;
+  }
+
+Both rules say the same thing here, so this is optional. No action needed
+unless you want the extra clarity.

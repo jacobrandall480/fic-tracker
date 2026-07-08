@@ -11,6 +11,7 @@ import {
 import {
   watchAuth, signUp, signIn, signOutUser, watchLibrary, saveFicsDiff, saveLists,
   watchTrash, restoreFromTrash, permanentlyDeleteTrash, purgeExpiredTrash,
+  getAo3Credentials,
 } from "./firebase.js";
 import Papa from "papaparse";
 
@@ -283,8 +284,19 @@ function emptyFic() {
 /* actual AO3 page server-side (no API key, no CORS issue).            */
 /* ---------------------------------------------------------------- */
 
-async function fetchMetadataFromLink(url) {
-  const resp = await fetch(`/fetch-fic?url=${encodeURIComponent(url)}`);
+async function fetchMetadataFromLink(url, uid) {
+  const params = new URLSearchParams({ url });
+  if (uid) {
+    params.set("userId", uid);
+    try {
+      const creds = await getAo3Credentials(uid);
+      if (creds?.ao3Username) params.set("ao3Username", creds.ao3Username);
+      if (creds?.ao3PasswordEnc) params.set("ao3PasswordEnc", creds.ao3PasswordEnc);
+    } catch {
+      // no saved credentials, or couldn't read them — proceed unauthenticated, same as before
+    }
+  }
+  const resp = await fetch(`/fetch-fic?${params.toString()}`);
   let data;
   try {
     data = await resp.json();
@@ -762,8 +774,7 @@ function CollectionBlock({
   );
 }
 
-function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection, autoFetch }) {
-  const [newCollectionName, setNewCollectionName] = useState("");
+function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection, autoFetch, uid }) {  const [newCollectionName, setNewCollectionName] = useState("");
   const [linkInput, setLinkInput] = useState(draft.link || "");
   const [fetchState, setFetchState] = useState("idle"); // idle | loading | done | error | locked
   const [fetchError, setFetchError] = useState("");
@@ -772,7 +783,7 @@ function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection
     if (!linkInput) return;
     setFetchState("loading");
     try {
-      const parsed = await fetchMetadataFromLink(linkInput);
+      const parsed = await fetchMetadataFromLink(linkInput, uid);
       setDraft((d) => {
         let seriesEntries = d.seriesEntries || [];
         if (parsed.seriesName) {
@@ -2333,7 +2344,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
       const workUrl = works[i];
       let meta;
       try {
-        meta = await fetchMetadataFromLink(workUrl);
+        meta = await fetchMetadataFromLink(workUrl, uid);
       } catch {
         failed.push(workUrl);
         await sleep(350);
@@ -3494,6 +3505,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
               seriesNames={seriesNames}
               onCreateCollection={quickCreateCollection}
               autoFetch={modal.autoFetch}
+              uid={uid}
             />
             {dup && (
               <p className="ft-fetch-msg ft-fetch-warn" style={{ margin: "0 18px" }}>

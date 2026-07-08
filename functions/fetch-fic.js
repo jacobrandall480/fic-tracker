@@ -4,6 +4,12 @@
 //
 // Ported from a Netlify Function — same logic, adapted to Cloudflare Pages Functions'
 // onRequestGet(context) convention and context.env instead of process.env.
+//
+// UPDATED: credential resolution for locked fics now supports per-user saved AO3 logins,
+// not just the owner's shared env vars. See "resolveCredentials" below — everything else
+// in this file is unchanged from before.
+
+import { decryptString } from "./lib/crypto.js";
 
 function decodeEntities(s) {
   return s
@@ -76,33 +82,16 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// AO3 occasionally serves a generic overload page ("Page Responding Too Slowly") that has
-// nothing to do with whether a work is actually restricted. Retry through that a couple of
-// times before ever assuming login is needed — login is for genuine access restriction, not
-// for AO3 having a slow moment.
-// Detects AO3's overload responses — these vary: sometimes a full "Page Responding Too
-// Slowly" HTML page, sometimes just a bare few words like "Retry later" (lowercase, no full
-// page at all). Checking case-insensitively for either phrase, plus treating any suspiciously
-// short response as overload too, since a real AO3 page (even a restricted one) is never this small.
 function isOverloadResponse(html) {
   return /page responding too slowly|retry later|shields are up/i.test(html) || html.length < 200;
 }
 
-// Exponential backoff with a little random jitter, so a burst of requests (e.g. several
-// people's functions, or you fetching a few fics close together) don't all retry in lockstep
-// and pile onto AO3 at the exact same moment — that synchronized-retry pattern is itself a
-// common cause of sustained overload, so spreading it out is a genuine improvement, not
-// just a delay for its own sake.
 function backoffMs(attempt) {
-  const base = 1200 * 2 ** attempt; // 1.2s, 2.4s, 4.8s, 9.6s
+  const base = 1200 * 2 ** attempt;
   const jitter = Math.random() * 500;
   return base + jitter;
 }
 
-// AO3's mobile skin (m.archiveofourown.org) renders a much lighter page than the desktop
-// site for the same work, and AO3 serves it from the same backend under the same official
-// domain — it's a normal entry point AO3 itself provides, not a workaround. When the desktop
-// page is overloaded, trying the mobile version once is a reasonable fallback before giving up.
 function toMobileUrl(url) {
   return url.replace(/^https:\/\/(www\.)?archiveofourown\.org/, "https://m.archiveofourown.org");
 }
@@ -123,8 +112,6 @@ async function fetchWorkWithRetry(url, options) {
     }
   }
 
-  // Still overloaded on the desktop domain after all retries — try the mobile skin once.
-  // It's a different (lighter) page, so it's worth one more attempt rather than giving up here.
   try {
     const mobileResp = await fetchWithTimeout(toMobileUrl(url), options);
     const mobileHtml = await mobileResp.text();
@@ -135,7 +122,7 @@ async function fetchWorkWithRetry(url, options) {
     // fall through to giving up below
   }
 
-  return html; // give up — caller will see no titleMatch either way
+  return html;
 }
 
 function cookieHeaderFromResponse(resp) {
@@ -164,12 +151,38 @@ function mergeCookieHeaders(...headers) {
     .join("; ");
 }
 
-// Only runs when a work comes back locked AND AO3_USERNAME/AO3_PASSWORD are set as
-// Cloudflare Pages environment variables. Logs in fresh each time (simpler and more robust
-// than trying to persist a session across separate, stateless function invocations).
-async function ao3Login(env) {
-  const username = env.AO3_USERNAME;
-  const password = env.AO3_PASSWORD;
+// --- NEW: figure out whose AO3 credentials (if anyone's) to use for this request. ---
+//
+// Priority:
+//   1. Request is from the owner (userId matches env.OWNER_UID) -> use env.AO3_USERNAME/PASSWORD.
+//      Set OWNER_UID once as a Cloudflare secret to your own Firebase Auth UID.
+//   2. Otherwise, if the request included ao3Username + ao3PasswordEnc (the frontend already
+//      fetched these from that user's own Firestore doc), decrypt and use those.
+//   3. Otherwise, no credentials at all — locked fics will just come back "locked" as before.
+//
+// This function replaces the old behavior where ao3Login() unconditionally read
+// env.AO3_USERNAME/env.AO3_PASSWORD for every single request, regardless of who was asking.
+async function resolveCredentials({ env, userId, ao3Username, ao3PasswordEnc }) {
+  if (env.OWNER_UID && userId && userId === env.OWNER_UID) {
+    return { username: env.AO3_USERNAME, password: env.AO3_PASSWORD };
+  }
+  if (ao3Username && ao3PasswordEnc) {
+    try {
+      const password = await decryptString(ao3PasswordEnc, env.ENCRYPTION_KEY);
+      return { username: ao3Username, password };
+    } catch {
+      // bad/corrupt ciphertext, or wrong key — treat as no credentials rather than throwing
+      return { username: null, password: null };
+    }
+  }
+  return { username: null, password: null };
+}
+
+// Only runs when a work comes back locked AND we resolved a username/password for this
+// request (either the owner's env vars, or a per-user saved+decrypted login). Logs in fresh
+// each time (simpler and more robust than trying to persist a session across separate,
+// stateless function invocations).
+async function ao3Login(username, password) {
   if (!username || !password) return null;
 
   try {
@@ -213,6 +226,12 @@ export async function onRequestGet(context) {
   const debug = reqUrl.searchParams.get("debug") === "1";
   const workMatch = url.match(/^https:\/\/(www\.|m\.)?archiveofourown\.org\/works\/(\d+)/);
 
+  // NEW: read the optional credential-related query params. The frontend adds these when
+  // calling fetch-fic for a fic that might be locked (see SETUP_GUIDE.md for the frontend side).
+  const userId = reqUrl.searchParams.get("userId") || "";
+  const ao3Username = reqUrl.searchParams.get("ao3Username") || "";
+  const ao3PasswordEnc = reqUrl.searchParams.get("ao3PasswordEnc") || "";
+
   if (!workMatch) {
     return jsonResponse({ error: "Please paste a link to an AO3 work page (archiveofourown.org/works/...)." }, 400);
   }
@@ -235,7 +254,8 @@ export async function onRequestGet(context) {
   // restricted) — not when AO3 itself was the problem, since login won't fix that and just
   // adds more slow requests on top of an already-struggling server.
   if (!titleMatch && !ao3Overloaded) {
-    const cookie = await ao3Login(env);
+    const { username, password } = await resolveCredentials({ env, userId, ao3Username, ao3PasswordEnc });
+    const cookie = await ao3Login(username, password);
     if (cookie) {
       try {
         const resp2 = await fetchWithTimeout(cleanUrl, { headers: { ...BROWSER_HEADERS, Cookie: cookie } });
@@ -257,7 +277,7 @@ export async function onRequestGet(context) {
         ? "AO3's server reported it was overloaded ('Page Responding Too Slowly') and didn't recover after a few retries. This is on AO3's end — wait a bit and try again."
         : usedLogin
         ? "Signed in, but still couldn't read this work — it may be restricted to a specific group or deleted."
-        : "Couldn't read this work's details — it may be restricted to logged-in AO3 users. Set AO3_USERNAME/AO3_PASSWORD as environment variables to let the app sign in automatically for these.",
+        : "Couldn't read this work's details — it may be restricted to logged-in AO3 users. Save your AO3 login in Settings to let the app sign in automatically for these.",
     };
     if (debug) {
       base.debug = true;
@@ -309,9 +329,6 @@ export async function onRequestGet(context) {
   const completed = completedMatch ? completedMatch[1] : null;
   const updatedRaw = updatedMatch ? updatedMatch[1] : null;
 
-  // Date started = Published. Date finished = Completed (or same as published for a oneshot —
-  // there's no separate "finished" moment for a single-chapter work). Last updated only matters
-  // for ongoing WIPs, since once a fic is complete, "finished" is the meaningful end date.
   const dateStarted = published;
   let dateFinished = null;
   let lastUpdated = null;
