@@ -1,0 +1,11 @@
+services:
+  fic-tracker:
+    build: .
+    ports:
+      - "8788:8788"
+    # Optional: only needed if you want to test the AO3 login fallback for
+    # locked fics locally. Copy .dev.vars.example to .dev.vars first and fill
+    # in real values — that file is gitignored/dockerignored, so it's never
+    # baked into the image, just mounted in at run time.
+    volumes:
+      - ./.dev.vars:/app/.dev.vars:ro

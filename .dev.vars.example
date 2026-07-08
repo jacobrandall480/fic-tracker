@@ -1,0 +1,12 @@
+# Copy this file to .dev.vars and fill in real values to test the AO3 login
+# fallback (for fics restricted to logged-in users) when running locally.
+#
+# .dev.vars is read automatically by `wrangler pages dev` and is already
+# excluded via .dockerignore and should also be added to .gitignore —
+# never commit real credentials here.
+#
+# Leave this unset entirely if you don't need the login fallback; locked
+# fics will just be reported as locked and you fill them in manually.
+
+AO3_USERNAME=
+AO3_PASSWORD=

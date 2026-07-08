@@ -1,0 +1,363 @@
+// Fetches an AO3 work page server-side (no CORS issue here, since this runs on Cloudflare's
+// servers, not in the user's browser) and parses out the metadata fields the tracker needs.
+// No API key, no AI guessing — just reading the actual page.
+//
+// Ported from a Netlify Function — same logic, adapted to Cloudflare Pages Functions'
+// onRequestGet(context) convention and context.env instead of process.env.
+
+function decodeEntities(s) {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function stripTags(html) {
+  return decodeEntities(
+    html
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n")
+      .replace(/<[^>]+>/g, "")
+  ).trim();
+}
+
+function extractDdBlock(html, classNames) {
+  const names = Array.isArray(classNames) ? classNames : [classNames];
+  for (const name of names) {
+    const re = new RegExp(`<dd class="${name} tags">([\\s\\S]*?)<\\/dd>`, "i");
+    const m = html.match(re);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+function extractTagList(block) {
+  if (!block) return [];
+  const tags = [];
+  const re = /<a class="tag"[^>]*>([^<]+)<\/a>/g;
+  let m;
+  while ((m = re.exec(block))) tags.push(decodeEntities(m[1]).trim());
+  return tags;
+}
+
+const RATING_MAP = {
+  "Not Rated": "NR",
+  "General Audiences": "G",
+  "Teen And Up Audiences": "T",
+  Mature: "M",
+  Explicit: "E",
+};
+
+const BROWSER_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// AO3 occasionally serves a generic overload page ("Page Responding Too Slowly") that has
+// nothing to do with whether a work is actually restricted. Retry through that a couple of
+// times before ever assuming login is needed — login is for genuine access restriction, not
+// for AO3 having a slow moment.
+// Detects AO3's overload responses — these vary: sometimes a full "Page Responding Too
+// Slowly" HTML page, sometimes just a bare few words like "Retry later" (lowercase, no full
+// page at all). Checking case-insensitively for either phrase, plus treating any suspiciously
+// short response as overload too, since a real AO3 page (even a restricted one) is never this small.
+function isOverloadResponse(html) {
+  return /page responding too slowly|retry later|shields are up/i.test(html) || html.length < 200;
+}
+
+// Exponential backoff with a little random jitter, so a burst of requests (e.g. several
+// people's functions, or you fetching a few fics close together) don't all retry in lockstep
+// and pile onto AO3 at the exact same moment — that synchronized-retry pattern is itself a
+// common cause of sustained overload, so spreading it out is a genuine improvement, not
+// just a delay for its own sake.
+function backoffMs(attempt) {
+  const base = 1200 * 2 ** attempt; // 1.2s, 2.4s, 4.8s, 9.6s
+  const jitter = Math.random() * 500;
+  return base + jitter;
+}
+
+// AO3's mobile skin (m.archiveofourown.org) renders a much lighter page than the desktop
+// site for the same work, and AO3 serves it from the same backend under the same official
+// domain — it's a normal entry point AO3 itself provides, not a workaround. When the desktop
+// page is overloaded, trying the mobile version once is a reasonable fallback before giving up.
+function toMobileUrl(url) {
+  return url.replace(/^https:\/\/(www\.)?archiveofourown\.org/, "https://m.archiveofourown.org");
+}
+
+async function fetchWorkWithRetry(url, options) {
+  let html = null;
+  let lastResp = null;
+  const ATTEMPTS = 4;
+  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      const retryAfter = lastResp && lastResp.headers.get("retry-after");
+      await sleep(retryAfter ? Number(retryAfter) * 1000 : backoffMs(attempt));
+    }
+    lastResp = await fetchWithTimeout(url, options);
+    html = await lastResp.text();
+    if (!isOverloadResponse(html)) {
+      return html;
+    }
+  }
+
+  // Still overloaded on the desktop domain after all retries — try the mobile skin once.
+  // It's a different (lighter) page, so it's worth one more attempt rather than giving up here.
+  try {
+    const mobileResp = await fetchWithTimeout(toMobileUrl(url), options);
+    const mobileHtml = await mobileResp.text();
+    if (!isOverloadResponse(mobileHtml)) {
+      return mobileHtml;
+    }
+  } catch {
+    // fall through to giving up below
+  }
+
+  return html; // give up — caller will see no titleMatch either way
+}
+
+function cookieHeaderFromResponse(resp) {
+  const arr = typeof resp.headers.getSetCookie === "function" ? resp.headers.getSetCookie() : [];
+  if (arr.length === 0) {
+    const single = resp.headers.get("set-cookie");
+    if (single) arr.push(single);
+  }
+  return arr.map((c) => c.split(";")[0].trim()).filter(Boolean).join("; ");
+}
+
+function mergeCookieHeaders(...headers) {
+  const map = {};
+  for (const h of headers) {
+    if (!h) continue;
+    for (const part of h.split(";")) {
+      const idx = part.indexOf("=");
+      if (idx === -1) continue;
+      const k = part.slice(0, idx).trim();
+      const v = part.slice(idx + 1).trim();
+      if (k) map[k] = v;
+    }
+  }
+  return Object.entries(map)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+}
+
+// Only runs when a work comes back locked AND AO3_USERNAME/AO3_PASSWORD are set as
+// Cloudflare Pages environment variables. Logs in fresh each time (simpler and more robust
+// than trying to persist a session across separate, stateless function invocations).
+async function ao3Login(env) {
+  const username = env.AO3_USERNAME;
+  const password = env.AO3_PASSWORD;
+  if (!username || !password) return null;
+
+  try {
+    const loginPageResp = await fetchWithTimeout("https://archiveofourown.org/users/login", { headers: BROWSER_HEADERS });
+    const loginPageHtml = await loginPageResp.text();
+    const tokenMatch = loginPageHtml.match(/name="authenticity_token" value="([^"]+)"/);
+    if (!tokenMatch) return null;
+    const initialCookies = cookieHeaderFromResponse(loginPageResp);
+
+    const body = new URLSearchParams({
+      authenticity_token: tokenMatch[1],
+      "user[login]": username,
+      "user[password]": password,
+      "user[remember_me]": "1",
+      commit: "Log In",
+    });
+
+    const loginResp = await fetchWithTimeout("https://archiveofourown.org/users/login", {
+      method: "POST",
+      headers: {
+        ...BROWSER_HEADERS,
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: initialCookies,
+      },
+      body: body.toString(),
+      redirect: "manual",
+    });
+
+    const loginCookies = cookieHeaderFromResponse(loginResp);
+    if (!loginCookies) return null;
+    return mergeCookieHeaders(initialCookies, loginCookies);
+  } catch {
+    return null;
+  }
+}
+
+export async function onRequestGet(context) {
+  const { request, env } = context;
+  const reqUrl = new URL(request.url);
+  const url = reqUrl.searchParams.get("url") || "";
+  const debug = reqUrl.searchParams.get("debug") === "1";
+  const workMatch = url.match(/^https:\/\/(www\.|m\.)?archiveofourown\.org\/works\/(\d+)/);
+
+  if (!workMatch) {
+    return jsonResponse({ error: "Please paste a link to an AO3 work page (archiveofourown.org/works/...)." }, 400);
+  }
+
+  const cleanUrl = `https://archiveofourown.org/works/${workMatch[2]}?view_adult=true`;
+
+  let html;
+  try {
+    html = await fetchWorkWithRetry(cleanUrl, { headers: BROWSER_HEADERS });
+  } catch (e) {
+    return jsonResponse({ error: "Couldn't reach AO3 right now. Try again in a moment." }, 502);
+  }
+
+  const ao3Overloaded = isOverloadResponse(html);
+  const titleMatch0 = html.match(/<h2 class="title heading">\s*([\s\S]*?)\s*<\/h2>/);
+  let titleMatch = titleMatch0;
+  let usedLogin = false;
+
+  // Only attempt login if the page loaded fine but genuinely isn't the work (i.e. likely
+  // restricted) — not when AO3 itself was the problem, since login won't fix that and just
+  // adds more slow requests on top of an already-struggling server.
+  if (!titleMatch && !ao3Overloaded) {
+    const cookie = await ao3Login(env);
+    if (cookie) {
+      try {
+        const resp2 = await fetchWithTimeout(cleanUrl, { headers: { ...BROWSER_HEADERS, Cookie: cookie } });
+        html = await resp2.text();
+        titleMatch = html.match(/<h2 class="title heading">\s*([\s\S]*?)\s*<\/h2>/);
+        usedLogin = true;
+      } catch {
+        // fall through to the locked response below
+      }
+    }
+  }
+
+  if (!titleMatch) {
+    const base = {
+      locked: true,
+      ao3Overloaded,
+      usedLogin,
+      error: ao3Overloaded
+        ? "AO3's server reported it was overloaded ('Page Responding Too Slowly') and didn't recover after a few retries. This is on AO3's end — wait a bit and try again."
+        : usedLogin
+        ? "Signed in, but still couldn't read this work — it may be restricted to a specific group or deleted."
+        : "Couldn't read this work's details — it may be restricted to logged-in AO3 users. Set AO3_USERNAME/AO3_PASSWORD as environment variables to let the app sign in automatically for these.",
+    };
+    if (debug) {
+      base.debug = true;
+      base.htmlLength = html.length;
+      base.containsTitleHeading = html.includes('<h2 class="title heading">');
+      base.containsLoginForm = html.includes("new_user_session_small");
+      base.excerpt = html.slice(0, 2500);
+    }
+    return jsonResponse(base);
+  }
+
+  const title = stripTags(titleMatch[1]);
+
+  const authorMatch = html.match(/rel="author"[^>]*>([^<]+)</);
+  const author = authorMatch ? decodeEntities(authorMatch[1]).trim() : null;
+
+  const summaryMatch = html.match(
+    /<div class="summary module">[\s\S]*?<blockquote class="userstuff">([\s\S]*?)<\/blockquote>/
+  );
+  const summary = summaryMatch ? stripTags(summaryMatch[1]) : null;
+
+  const ratingText = extractTagList(extractDdBlock(html, "rating"))[0];
+  const rating = RATING_MAP[ratingText] || null;
+  const warnings = extractTagList(extractDdBlock(html, ["warnings", "warning"]));
+  const fandoms = extractTagList(extractDdBlock(html, "fandom"));
+  const relationships = extractTagList(extractDdBlock(html, "relationship"));
+  const characters = extractTagList(extractDdBlock(html, "character"));
+  const tags = extractTagList(extractDdBlock(html, "freeform"));
+
+  const wordsMatch = html.match(/<dd class="words">([\d,]+)<\/dd>/);
+  const wordCount = wordsMatch ? Number(wordsMatch[1].replace(/,/g, "")) : null;
+
+  const chaptersMatch =
+    html.match(/<dd class="chapters">\s*<a[^>]*>(\d+)<\/a>\/(\d+|\?)\s*<\/dd>/) ||
+    html.match(/<dd class="chapters">\s*(\d+)\/(\d+|\?)\s*<\/dd>/);
+  let chapterCurrent = null;
+  let chapterTotal = null;
+  let ficStatus = null;
+  if (chaptersMatch) {
+    chapterCurrent = Number(chaptersMatch[1]);
+    chapterTotal = chaptersMatch[2] === "?" ? null : Number(chaptersMatch[2]);
+    ficStatus = chapterTotal && chapterCurrent === chapterTotal ? "Complete" : "WIP";
+  }
+
+  const publishedMatch = html.match(/<dt[^>]*>Published:<\/dt>\s*<dd[^>]*>([\d-]+)<\/dd>/);
+  const completedMatch = html.match(/<dt[^>]*>Completed:<\/dt>\s*<dd[^>]*>([\d-]+)<\/dd>/);
+  const updatedMatch = html.match(/<dt[^>]*>Updated:<\/dt>\s*<dd[^>]*>([\d-]+)<\/dd>/);
+  const published = publishedMatch ? publishedMatch[1] : null;
+  const completed = completedMatch ? completedMatch[1] : null;
+  const updatedRaw = updatedMatch ? updatedMatch[1] : null;
+
+  // Date started = Published. Date finished = Completed (or same as published for a oneshot —
+  // there's no separate "finished" moment for a single-chapter work). Last updated only matters
+  // for ongoing WIPs, since once a fic is complete, "finished" is the meaningful end date.
+  const dateStarted = published;
+  let dateFinished = null;
+  let lastUpdated = null;
+  if (chapterTotal === 1) {
+    dateFinished = published;
+  } else if (ficStatus === "Complete") {
+    dateFinished = completed || published;
+  } else {
+    lastUpdated = updatedRaw || published;
+  }
+
+  const seriesMatch = html.match(/Part (\d+) of[\s\S]{0,40}?<a[^>]*>([^<]+)<\/a>\s*series/);
+  const seriesPosition = seriesMatch ? Number(seriesMatch[1]) : null;
+  const seriesName = seriesMatch ? stripTags(seriesMatch[2]) : null;
+
+  let debugInfo = {};
+  if (debug) {
+    const warnIdx = html.search(/Warning/i);
+    const statsIdx = html.search(/Published:/i);
+    debugInfo = {
+      debug: true,
+      warningsContext: warnIdx === -1 ? null : html.slice(Math.max(0, warnIdx - 200), warnIdx + 900),
+      statsContext: statsIdx === -1 ? null : html.slice(Math.max(0, statsIdx - 100), statsIdx + 1200),
+    };
+  }
+
+  return jsonResponse({
+    title,
+    author,
+    fandoms,
+    relationships,
+    characters,
+    rating,
+    warnings,
+    wordCount,
+    chapterCurrent,
+    chapterTotal,
+    ficStatus,
+    dateStarted,
+    dateFinished,
+    lastUpdated,
+    summary,
+    tags,
+    seriesName,
+    seriesPosition,
+    locked: false,
+    ...debugInfo,
+  });
+}
