@@ -15,7 +15,9 @@ Cloudflare Pages.
 - **Undo** — every status change, edit, and import is reversible from a Recent Changes panel, on
   top of a 30-day Trash for deletions.
 - **Stats**: words read, top fandoms/ships/tags, open WIPs to check on.
-
+- **Locked/restricted fics**: save your AO3 login once in Settings and the app signs in
+  automatically to fetch details for works that require it. Your password is encrypted before
+  being stored and is never shared with other accounts.
 ## Using it on your computer
 
 ### Adding fics from AO3
@@ -139,25 +141,54 @@ be there.
 
 ```
 npm run build
-wrangler pages deploy dist --project-name=fic-tracker
+wrangler pages deploy dist --project-name=fic-tracker --branch=production
 ```
 
 Run this **from the project root** (`functions/` and `dist/` need to be siblings) — Wrangler picks
 up `functions/` automatically. First run creates the Pages project; every run after redeploys to
 it. It prints your live URL (`https://fic-tracker-xxx.pages.dev` or similar).
 
+**The `--branch=production` flag matters** if this project isn't connected to a GitHub repo on
+Cloudflare's side (Pages → project → Settings → Build → "Git repository" shows "Connect" rather
+than a linked repo). Without it, Wrangler tags the deploy with whatever your local git branch
+happens to be, which can land it as a Preview deployment instead of Production — meaning your
+main domain (`fic-tracker.pages.dev`) silently stops updating even though the deploy itself
+succeeds. Check **Deployments** tab → **Production** section to confirm the domain is pointing at
+your latest deploy, not an old one, if pages ever seem to be serving stale content after a deploy.
+
 If you're not using the default `fic-tracker.pages.dev` URL, update `ORIGIN` in
 `ios-shortcut-add-fic.js`, `ios-shortcut-add-bulk.js`, and `ios-shortcut-update-progress.js` to
 match.
 
-### AO3 login env vars (optional, for locked/restricted fics)
+### Secrets
 
 ```
 wrangler pages secret put AO3_USERNAME --project-name=fic-tracker
 wrangler pages secret put AO3_PASSWORD --project-name=fic-tracker
+wrangler pages secret put ENCRYPTION_KEY --project-name=fic-tracker
+wrangler pages secret put OWNER_UID --project-name=fic-tracker
 ```
 
-Or via the dashboard: your project → **Settings → Environment variables**.
+- **`AO3_USERNAME` / `AO3_PASSWORD`** (optional) — your own AO3 login, used automatically
+  whenever *you* (matched via `OWNER_UID` below) hit a locked/restricted fic. Not required if you
+  don't need this for yourself specifically.
+- **`ENCRYPTION_KEY`** (required if you want other users to be able to save their own AO3 login
+  in Settings) — encrypts saved passwords before they're written to Firestore. Generate once with:
+```
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+**Never change this once anyone has saved credentials** — doing so makes every saved password
+  permanently undecryptable, and everyone would need to re-save.
+- **`OWNER_UID`** (optional, pairs with `AO3_USERNAME`/`AO3_PASSWORD`) — your own Firebase Auth
+  UID (Firebase Console → Authentication → Users → your row), so the app recognizes *you*
+  specifically and skips the Settings prompt for your own account.
+
+If this project has a Preview environment you also test against (e.g. a separate git branch),
+set all four secrets there too, with the **same values** — append `--env preview` to each command
+above.
+
+Or set any of these via the dashboard: your project → **Settings → Variables and secrets**.
+
 
 ### Firebase
 
@@ -188,9 +219,12 @@ docker compose up --build
 ```
 src/App.jsx                          — the whole app (single-file React component)
 src/firebase.js                      — Firebase config + all read/write helpers
+src/components/AO3CredentialsSettings.jsx — UI for saving/removing a per-user AO3 login
 functions/fetch-fic.js               — server-side single-work fetch (Cloudflare Pages Function)
 functions/fetch-series.js            — server-side series fetch
 functions/fetch-collection-bookmarks.js
+functions/encrypt-ao3-password.js    — encrypts a password before it's saved to Firestore
+functions/lib/crypto.js              — AES-GCM encrypt/decrypt helpers, keyed by ENCRYPTION_KEY
 public/manifest.webmanifest          — PWA manifest
 public/apple-touch-icon.png, icon-*.png
 ios-shortcut-add-fic.js              — paste into the iOS "Add to Fic Tracker" shortcut
