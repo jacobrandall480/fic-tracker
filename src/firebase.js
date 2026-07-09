@@ -7,7 +7,7 @@ import {
   signOut,
 } from "firebase/auth";
 import {
-  getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot,
+  getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot,
   collection, writeBatch, getDocs, deleteField,
 } from "firebase/firestore";
 
@@ -244,4 +244,16 @@ export function saveLists(uid, lists) {
 export async function getAo3Credentials(uid) {
   const snap = await getDoc(doc(db, "users", uid, "private", "ao3Credentials"));
   return snap.exists() ? snap.data() : null;
+}
+
+export function saveAo3Credentials(uid, ao3Username, ao3PasswordEnc) {
+  return setDoc(doc(db, "users", uid, "private", "ao3Credentials"), {
+    ao3Username,
+    ao3PasswordEnc,
+    updatedAt: Date.now(),
+  });
+}
+
+export function removeAo3Credentials(uid) {
+  return deleteDoc(doc(db, "users", uid, "private", "ao3Credentials"));
 }

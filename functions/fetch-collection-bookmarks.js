@@ -47,11 +47,15 @@ function jsonResponse(data, status = 200) {
   });
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = PER_REQUEST_TIMEOUT_MS) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      cf: { cacheTtl: 0, cacheEverything: false },
+    });
   } finally {
     clearTimeout(timer);
   }

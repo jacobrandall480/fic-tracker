@@ -74,7 +74,11 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      cf: { cacheTtl: 0, cacheEverything: false },
+    });
   } finally {
     clearTimeout(timer);
   }
@@ -250,11 +254,23 @@ export async function onRequestGet(context) {
   let titleMatch = titleMatch0;
   let usedLogin = false;
 
+  // NEW: capture exactly what credential resolution decided, for debug visibility,
+  // regardless of whether login actually ends up being attempted below.
+  const credCheck = await resolveCredentials({ env, userId, ao3Username, ao3PasswordEnc });
+  const credDebugInfo = {
+    receivedUserId: userId || null,
+    ownerUidIsSet: !!env.OWNER_UID,
+    uidMatchesOwner: !!(env.OWNER_UID && userId && userId === env.OWNER_UID),
+    resolvedUsername: credCheck.username || null, // safe to show — usernames aren't secret
+    resolvedHasPassword: !!credCheck.password, // never show the actual password
+    initialFetchAlreadyLoggedIn: html.includes('class="logged-in"'),
+  };
+
   // Only attempt login if the page loaded fine but genuinely isn't the work (i.e. likely
   // restricted) — not when AO3 itself was the problem, since login won't fix that and just
   // adds more slow requests on top of an already-struggling server.
   if (!titleMatch && !ao3Overloaded) {
-    const { username, password } = await resolveCredentials({ env, userId, ao3Username, ao3PasswordEnc });
+    const { username, password } = credCheck;
     const cookie = await ao3Login(username, password);
     if (cookie) {
       try {
@@ -285,6 +301,7 @@ export async function onRequestGet(context) {
       base.containsTitleHeading = html.includes('<h2 class="title heading">');
       base.containsLoginForm = html.includes("new_user_session_small");
       base.excerpt = html.slice(0, 2500);
+      base.credDebugInfo = credDebugInfo;
     }
     return jsonResponse(base);
   }
@@ -352,6 +369,8 @@ export async function onRequestGet(context) {
       debug: true,
       warningsContext: warnIdx === -1 ? null : html.slice(Math.max(0, warnIdx - 200), warnIdx + 900),
       statsContext: statsIdx === -1 ? null : html.slice(Math.max(0, statsIdx - 100), statsIdx + 1200),
+      credDebugInfo,
+      usedLogin,
     };
   }
 

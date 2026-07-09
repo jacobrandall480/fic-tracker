@@ -11,7 +11,7 @@ import {
 import {
   watchAuth, signUp, signIn, signOutUser, watchLibrary, saveFicsDiff, saveLists,
   watchTrash, restoreFromTrash, permanentlyDeleteTrash, purgeExpiredTrash,
-  getAo3Credentials,
+  getAo3Credentials, saveAo3Credentials, removeAo3Credentials,
 } from "./firebase.js";
 import Papa from "papaparse";
 
@@ -774,9 +774,106 @@ function CollectionBlock({
   );
 }
 
-function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection, autoFetch, uid }) {  const [newCollectionName, setNewCollectionName] = useState("");
-  const [linkInput, setLinkInput] = useState(draft.link || "");
-  const [fetchState, setFetchState] = useState("idle"); // idle | loading | done | error | locked
+function AO3CredentialsSection({ uid }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [hasSaved, setHasSaved] = useState(false);
+  const [status, setStatus] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    getAo3Credentials(uid).then((creds) => {
+      if (cancelled) return;
+      if (creds) {
+        setHasSaved(true);
+        setUsername(creds.ao3Username || "");
+      }
+      setLoading(false);
+    }).catch(() => setLoading(false));
+    return () => { cancelled = true; };
+  }, [uid]);
+
+  async function handleSave(e) {
+    e.preventDefault();
+    setStatus("Saving...");
+    try {
+      const res = await fetch("/encrypt-ao3-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!res.ok) throw new Error("Encryption request failed");
+      const { encrypted } = await res.json();
+      await saveAo3Credentials(uid, username, encrypted);
+      setPassword("");
+      setHasSaved(true);
+      setStatus("Saved — you won't need to re-enter this for locked fics.");
+    } catch (err) {
+      setStatus(`Error: ${err.message}`);
+    }
+  }
+
+  async function handleRemove() {
+    setStatus("Removing...");
+    try {
+      await removeAo3Credentials(uid);
+      setHasSaved(false);
+      setUsername("");
+      setPassword("");
+      setStatus("Removed.");
+    } catch (err) {
+      setStatus(`Error: ${err.message}`);
+    }
+  }
+
+  if (loading) return <div className="ft-settings-row"><p className="ft-muted">Loading AO3 login settings…</p></div>;
+
+  return (
+    <div className="ft-settings-row" style={{ display: "block" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+        <strong style={{ fontSize: 13 }}>AO3 login (optional)</strong>
+        <HelpTooltip>
+          Only needed to fetch details for locked/restricted works. Your password is
+          encrypted before it's saved, and only used to look up fics on your behalf.
+        </HelpTooltip>
+      </div>
+
+      {hasSaved ? (
+        <div>
+          <p className="ft-muted" style={{ marginBottom: 6 }}>Saved for: <strong>{username}</strong></p>
+          <button className="ft-btn ft-btn-ghost" onClick={handleRemove}>Remove saved login</button>
+        </div>
+      ) : (
+        <form onSubmit={handleSave} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <input
+            className="ft-input"
+            type="text"
+            placeholder="AO3 username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            required
+          />
+          <input
+            className="ft-input"
+            type="password"
+            placeholder="AO3 password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+          <button className="ft-btn ft-btn-primary" type="submit" style={{ alignSelf: "flex-start" }}>Save</button>
+        </form>
+      )}
+
+      {status && <p className="ft-muted" style={{ marginTop: 6 }}>{status}</p>}
+    </div>
+  );
+}
+
+function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection, autoFetch, uid, onOpenSettings }) {
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [linkInput, setLinkInput] = useState(draft.link || "");  const [fetchState, setFetchState] = useState("idle"); // idle | loading | done | error | locked
   const [fetchError, setFetchError] = useState("");
 
   const doFetch = async () => {
@@ -882,10 +979,22 @@ function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection
             </button>
           </div>
         </Field>
-        {fetchState === "done" && <p className="ft-fetch-msg ft-fetch-ok"><Check size={13} /> Filled in below — double check before saving.</p>}
         {fetchState === "locked" && (
           <p className="ft-fetch-msg ft-fetch-warn">
             <AlertTriangle size={13} /> {fetchError || "This work may require an AO3 login — fill in the rest manually."}
+            {onOpenSettings && (
+              <>
+                {" "}
+                <button
+                  type="button"
+                  className="ft-btn ft-btn-ghost"
+                  style={{ marginLeft: 6, padding: "2px 8px", fontSize: 12 }}
+                  onClick={onOpenSettings}
+                >
+                  Add AO3 login
+                </button>
+              </>
+            )}
           </p>
         )}
         {fetchState === "error" && (
@@ -3506,6 +3615,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
               onCreateCollection={quickCreateCollection}
               autoFetch={modal.autoFetch}
               uid={uid}
+              onOpenSettings={() => { setModal(null); setSettingsOpen(true); }}
             />
             {dup && (
               <p className="ft-fetch-msg ft-fetch-warn" style={{ margin: "0 18px" }}>
@@ -3822,6 +3932,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
           <div className="ft-settings-row">
             <button className="ft-btn ft-btn-ghost" onClick={onSignOut}><LogOut size={14} /> Sign out</button>
           </div>
+          <AO3CredentialsSection uid={uid} />
           <div className="ft-settings-row" style={{ display: "block" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
               <strong style={{ fontSize: 13 }}>Add a fic straight from AO3</strong>
