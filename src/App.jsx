@@ -3,7 +3,7 @@ import {
   BookOpen, Search, Plus, X, RotateCcw, Download, Upload,
   Trash2, Pencil, Link2, Users, Layers,
   BarChart3, Heart, Loader2, AlertTriangle, Settings, Bookmark,
-  Inbox, Check, LogOut, Mail, Lock, HelpCircle, ChevronDown, ChevronRight, Undo2, Copy
+  Inbox, Check, LogOut, Mail, Lock, HelpCircle, ChevronDown, ChevronRight, Undo2
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
@@ -11,7 +11,6 @@ import {
 import {
   watchAuth, signUp, signIn, signOutUser, watchLibrary, saveFicsDiff, saveLists,
   watchTrash, restoreFromTrash, permanentlyDeleteTrash, purgeExpiredTrash,
-  getAo3Credentials, saveAo3Credentials, removeAo3Credentials,
 } from "./firebase.js";
 import Papa from "papaparse";
 
@@ -19,12 +18,7 @@ import Papa from "papaparse";
 /* Constants                                                         */
 /* ---------------------------------------------------------------- */
 
-// "Caught Up" sits between "Currently Reading" and "Completed" — it's for a WIP you've
-// read everything posted so far of, but the fic itself isn't done, so calling it
-// "Completed" would be wrong. Keeping it out of "Currently Reading" is the whole point
-// (so finished-for-now WIPs stop cluttering that filter) while still being its own
-// filterable status, so you can pull up exactly the WIPs you're waiting on later.
-const READING_STATUSES = ["Unread", "Currently Reading", "Caught Up", "Completed", "On Hold", "Abandoned"];
+const READING_STATUSES = ["Unread", "Currently Reading", "Completed", "On Hold", "Abandoned"];
 const FIC_STATUSES = ["Complete", "WIP", "Hiatus"];
 const RATINGS = ["NR", "G", "T", "M", "E"];
 const COMMON_WARNINGS = [
@@ -39,7 +33,6 @@ const COMMON_WARNINGS = [
 const READING_COLOR = {
   Unread: "var(--c-muted)",
   "Currently Reading": "var(--c-blue)",
-  "Caught Up": "var(--c-gold)",
   Completed: "var(--c-sage)",
   "On Hold": "var(--c-accent)",
   Abandoned: "var(--c-rose)",
@@ -63,10 +56,6 @@ const NAV_ITEMS = [
 const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const today = () => new Date().toISOString().slice(0, 10);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const truncateTitle = (t, max = 40) => {
-  const s = (t || "Untitled").trim();
-  return s.length > max ? s.slice(0, max - 1).trimEnd() + "…" : s;
-};
 
 // UI preferences only (filters, sort, what's collapsed) — not library data, which lives in
 // Firestore. Scoped to this browser; safe to use real localStorage since this is a normal
@@ -105,33 +94,6 @@ function parseCsvRating(text) {
   const upper = text.trim().toUpperCase();
   return ["NR", "G", "T", "M", "E"].includes(upper) ? upper : "";
 }
-// AO3 shows "?" for a WIP's total chapter count when the author hasn't said how many
-// there'll be — every scrape path (single bookmarklet, bulk bookmarklet, server fetch,
-// CSV chapters column) already parses that into `null` to distinguish it from "we just
-// don't have data here at all". This folds that `null` into the app's own "?" sentinel
-// (the same character AO3 uses, so it reads naturally everywhere chapterTotal is
-// displayed) — a real number passes through untouched, and anything else (missing/blank/
-// undefined — genuinely no info, not a confirmed "unknown") keeps whatever fallback the
-// caller already had.
-function normalizeChapterTotal(value, fallback) {
-  if (value === null || value === "?") return "?";
-  if (typeof value === "number" && value > 0) return value;
-  return fallback;
-}
-
-// When a scrape/import doesn't give us an explicit ficStatus, infer it from chapter
-// counts if we can — and if we genuinely can't (unknown total, or no chapter data at
-// all), default to "WIP" rather than "Complete". A wrong "WIP" just means you get
-// prompted to check on it later; a wrong "Complete" silently claims a fic is finished
-// (wrong badge, wrong "finished" date, drops out of WIP tracking) when it might not be.
-function inferFicStatus(ficStatus, chapterCurrent, chapterTotal) {
-  if (ficStatus) return ficStatus;
-  if (typeof chapterTotal === "number" && chapterTotal > 0) {
-    return chapterCurrent === chapterTotal ? "Complete" : "WIP";
-  }
-  return "WIP";
-}
-
 function parseChaptersText(text) {
   const m = (text || "").match(/^(\d+)\s*\/\s*(\d+|\?)$/);
   if (!m) return { current: null, total: null };
@@ -194,7 +156,7 @@ const progressOf = (f) => {
   return f.progressPercent || 0;
 };
 const wordsReadOf = (f) => {
-  if (f.readingStatus === "Completed" || f.readingStatus === "Caught Up") return f.wordCount || 0;
+  if (f.readingStatus === "Completed") return f.wordCount || 0;
   return Math.round((f.wordCount || 0) * (progressOf(f) / 100));
 };
 
@@ -225,25 +187,6 @@ function findDuplicate(draft, fics, excludeId) {
   );
 }
 
-// Adds any series memberships from `freshEntries` that `existingEntries` doesn't already
-// have, updating a stale position if one's given — never drops a membership that's
-// already there. `freshEntries` can be the seriesEntries array shape (manual edit/add) or
-// a single {seriesName, seriesPosition} shape (a raw AO3 scrape) — callers normalize
-// either into an array before calling this.
-function mergeSeriesEntries(existingEntries, freshEntries) {
-  let merged = existingEntries || [];
-  (freshEntries || []).forEach((fe) => {
-    if (!fe || !fe.seriesName) return;
-    const idx = merged.findIndex((e) => e.seriesName === fe.seriesName);
-    if (idx === -1) {
-      merged = [...merged, { seriesName: fe.seriesName, seriesPosition: fe.seriesPosition ?? "" }];
-    } else if (fe.seriesPosition != null && fe.seriesPosition !== "" && merged[idx].seriesPosition !== fe.seriesPosition) {
-      merged = merged.map((e, i) => (i === idx ? { ...e, seriesPosition: fe.seriesPosition } : e));
-    }
-  });
-  return merged;
-}
-
 function emptyFic() {
   return {
     id: genId(),
@@ -258,7 +201,6 @@ function emptyFic() {
     chapterCurrent: 0, // chapters AO3 has actually posted right now — not your reading progress
     chapterTotal: 1, // chapters the fic will have once complete (AO3's own stated total)
     readChapter: 0, // YOUR reading progress — which posted chapter you're on; capped at chapterCurrent
-    lastReadUrl: "", // exact AO3 chapter URL you last updated progress from — "Continue reading" opens this instead of the bare work link
     link: "",
     source: "AO3",
     readingStatus: "Unread",
@@ -284,19 +226,8 @@ function emptyFic() {
 /* actual AO3 page server-side (no API key, no CORS issue).            */
 /* ---------------------------------------------------------------- */
 
-async function fetchMetadataFromLink(url, uid) {
-  const params = new URLSearchParams({ url });
-  if (uid) {
-    params.set("userId", uid);
-    try {
-      const creds = await getAo3Credentials(uid);
-      if (creds?.ao3Username) params.set("ao3Username", creds.ao3Username);
-      if (creds?.ao3PasswordEnc) params.set("ao3PasswordEnc", creds.ao3PasswordEnc);
-    } catch {
-      // no saved credentials, or couldn't read them — proceed unauthenticated, same as before
-    }
-  }
-  const resp = await fetch(`/fetch-fic?${params.toString()}`);
+async function fetchMetadataFromLink(url) {
+  const resp = await fetch(`/fetch-fic?url=${encodeURIComponent(url)}`);
   let data;
   try {
     data = await resp.json();
@@ -331,17 +262,10 @@ function ProgressBar({ pct, color }) {
   );
 }
 
-function Modal({ title, onClose, children, wide, onEnter }) {
-  const handleKeyDown = (e) => {
-    if (e.key !== "Enter" || !onEnter) return;
-    const tag = e.target.tagName;
-    if (tag === "TEXTAREA" || tag === "BUTTON") return; // let newlines through; buttons already handle their own Enter/click
-    e.preventDefault();
-    onEnter();
-  };
+function Modal({ title, onClose, children, wide }) {
   return (
     <div className="ft-modal-backdrop" onClick={onClose}>
-      <div className={"ft-modal" + (wide ? " ft-modal-wide" : "")} onClick={(e) => e.stopPropagation()} onKeyDown={handleKeyDown}>
+      <div className={"ft-modal" + (wide ? " ft-modal-wide" : "")} onClick={(e) => e.stopPropagation()}>
         <div className="ft-modal-head">
           <h2>{title}</h2>
           <button className="ft-iconbtn" onClick={onClose} aria-label="Close">
@@ -463,25 +387,13 @@ function MultiSelectFilter({ label, options, selected, onChange, placeholder, co
 /* Fic card + edit form                                              */
 /* ---------------------------------------------------------------- */
 
-function FicCard({ fic, onEdit, onDelete, onQuickStatus, confirmingDelete }) {
+function FicCard({ fic, onEdit, onDelete, onQuickStatus, confirmingDelete, collectionNames }) {
   const pct = progressOf(fic);
   return (
     <div className="ft-card">
       <div className="ft-card-top">
         <div className="ft-card-title-wrap">
-          <a
-            href={fic.readingStatus === "Completed" ? (fic.link || undefined) : (fic.lastReadUrl || fic.link || undefined)}
-            target="_blank"
-            rel="noreferrer"
-            className="ft-card-title"
-            title={
-              fic.readingStatus === "Completed"
-                ? "Open on AO3 (from the top)"
-                : fic.lastReadUrl && fic.lastReadUrl !== fic.link
-                ? "Continue reading on AO3"
-                : "Open on AO3"
-            }
-          >
+          <a href={fic.link || undefined} target="_blank" rel="noreferrer" className="ft-card-title">
             {fic.title || "Untitled"}
           </a>
           <div className="ft-card-author">by {fic.author || "Unknown"}</div>
@@ -504,6 +416,11 @@ function FicCard({ fic, onEdit, onDelete, onQuickStatus, confirmingDelete }) {
         {(fic.seriesEntries || []).map((entry) => (
           <span key={entry.seriesName} className="ft-chip ft-chip-series">
             <Layers size={11} /> {entry.seriesName} #{entry.seriesPosition || "?"}
+          </span>
+        ))}
+        {(collectionNames || []).map((name) => (
+          <span key={name} className="ft-chip ft-chip-collection">
+            <Bookmark size={11} /> {name}
           </span>
         ))}
         {(fic.fandoms || []).slice(0, 3).map((f) => (
@@ -532,9 +449,11 @@ function FicCard({ fic, onEdit, onDelete, onQuickStatus, confirmingDelete }) {
           </span>
         </div>
         <div className="ft-card-dates">
-          {fic.ficStatus === "Complete"
-            ? `Fic finished ${fmtDate(fic.dateFinished || fic.dateAdded)}`
-            : `Updated ${fmtDate(fic.lastUpdated || fic.dateAdded)}`}
+          {fic.ficStatus === "Complete" && fic.dateFinished
+            ? `Fic finished ${fmtDate(fic.dateFinished)}`
+            : fic.ficStatus !== "Complete" && fic.lastUpdated
+            ? `Updated ${fmtDate(fic.lastUpdated)}`
+            : `Added ${fmtDate(fic.dateAdded)}`}
         </div>
       </div>
 
@@ -547,16 +466,8 @@ function FicCard({ fic, onEdit, onDelete, onQuickStatus, confirmingDelete }) {
             {(fic.readCount || 0) > 0 ? "Read again" : "Start reading"}
           </button>
         )}
-        {fic.ficStatus !== "Complete" ? (
-          fic.readingStatus !== "Caught Up" && (
-            <button className="ft-pill" onClick={() => onQuickStatus(fic.id, "Caught Up")} title="You're read up to the latest posted chapter — the fic itself isn't finished yet">
-              Caught up (so far)
-            </button>
-          )
-        ) : (
-          fic.readingStatus !== "Completed" && (
-            <button className="ft-pill" onClick={() => onQuickStatus(fic.id, "Completed")}>Mark complete</button>
-          )
+        {fic.readingStatus !== "Completed" && (
+          <button className="ft-pill" onClick={() => onQuickStatus(fic.id, "Completed")}>Mark complete</button>
         )}
       </div>
     </div>
@@ -566,7 +477,7 @@ function FicCard({ fic, onEdit, onDelete, onQuickStatus, confirmingDelete }) {
 function SeriesBlock({
   name, meta, items, collapsed, onToggleCollapse,
   onAddToCollection, onToggleCompleted, onEdit, onDelete,
-  onBulkDelete, onBulkMarkStatus, onEditFic, onDeleteFic, onQuickStatus, confirmDeleteId,
+  onBulkDelete, onBulkMarkStatus, onEditFic, onDeleteFic, onQuickStatus, confirmDeleteId, ficCollectionNames,
 }) {
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState(new Set());
@@ -659,7 +570,7 @@ function SeriesBlock({
                     <input type="checkbox" checked={selected.has(f.id)} onChange={() => toggleSelected(f.id)} />
                   </label>
                 )}
-                <FicCard fic={f} onEdit={onEditFic} onDelete={onDeleteFic} onQuickStatus={onQuickStatus} confirmingDelete={confirmDeleteId === f.id} />
+                <FicCard fic={f} onEdit={onEditFic} onDelete={onDeleteFic} onQuickStatus={onQuickStatus} confirmingDelete={confirmDeleteId === f.id} collectionNames={ficCollectionNames ? ficCollectionNames(f) : []} />
               </div>
             ))}
           </div>
@@ -671,7 +582,7 @@ function SeriesBlock({
 
 function CollectionBlock({
   collection, items, collapsed, onToggleCollapse, onEdit, onDelete,
-  onRemoveSelected, onMoveSelected, onBulkDelete, onBulkMarkStatus, allCollections, onEditFic, onDeleteFic, onQuickStatus, confirmDeleteId,
+  onRemoveSelected, onMoveSelected, onBulkDelete, onBulkMarkStatus, allCollections, onEditFic, onDeleteFic, onQuickStatus, confirmDeleteId, ficCollectionNames,
 }) {
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState(new Set());
@@ -765,7 +676,7 @@ function CollectionBlock({
                     <input type="checkbox" checked={selected.has(f.id)} onChange={() => toggleSelected(f.id)} />
                   </label>
                 )}
-                <FicCard fic={f} onEdit={onEditFic} onDelete={onDeleteFic} onQuickStatus={onQuickStatus} confirmingDelete={confirmDeleteId === f.id} />
+                <FicCard fic={f} onEdit={onEditFic} onDelete={onDeleteFic} onQuickStatus={onQuickStatus} confirmingDelete={confirmDeleteId === f.id} collectionNames={ficCollectionNames ? ficCollectionNames(f) : []} />
               </div>
             ))}
           </div>
@@ -774,113 +685,17 @@ function CollectionBlock({
   );
 }
 
-function AO3CredentialsSection({ uid }) {
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [hasSaved, setHasSaved] = useState(false);
-  const [status, setStatus] = useState("");
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    getAo3Credentials(uid).then((creds) => {
-      if (cancelled) return;
-      if (creds) {
-        setHasSaved(true);
-        setUsername(creds.ao3Username || "");
-      }
-      setLoading(false);
-    }).catch(() => setLoading(false));
-    return () => { cancelled = true; };
-  }, [uid]);
-
-  async function handleSave(e) {
-    e.preventDefault();
-    setStatus("Saving...");
-    try {
-      const res = await fetch("/encrypt-ao3-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      if (!res.ok) throw new Error("Encryption request failed");
-      const { encrypted } = await res.json();
-      await saveAo3Credentials(uid, username, encrypted);
-      setPassword("");
-      setHasSaved(true);
-      setStatus("Saved — you won't need to re-enter this for locked fics.");
-    } catch (err) {
-      setStatus(`Error: ${err.message}`);
-    }
-  }
-
-  async function handleRemove() {
-    setStatus("Removing...");
-    try {
-      await removeAo3Credentials(uid);
-      setHasSaved(false);
-      setUsername("");
-      setPassword("");
-      setStatus("Removed.");
-    } catch (err) {
-      setStatus(`Error: ${err.message}`);
-    }
-  }
-
-  if (loading) return <div className="ft-settings-row"><p className="ft-muted">Loading AO3 login settings…</p></div>;
-
-  return (
-    <div className="ft-settings-row" style={{ display: "block" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-        <strong style={{ fontSize: 13 }}>AO3 login (optional)</strong>
-        <HelpTooltip>
-          Only needed to fetch details for locked/restricted works. Your password is
-          encrypted before it's saved, and only used to look up fics on your behalf.
-        </HelpTooltip>
-      </div>
-
-      {hasSaved ? (
-        <div>
-          <p className="ft-muted" style={{ marginBottom: 6 }}>Saved for: <strong>{username}</strong></p>
-          <button className="ft-btn ft-btn-ghost" onClick={handleRemove}>Remove saved login</button>
-        </div>
-      ) : (
-        <form onSubmit={handleSave} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <input
-            className="ft-input"
-            type="text"
-            placeholder="AO3 username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            required
-          />
-          <input
-            className="ft-input"
-            type="password"
-            placeholder="AO3 password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-          />
-          <button className="ft-btn ft-btn-primary" type="submit" style={{ alignSelf: "flex-start" }}>Save</button>
-        </form>
-      )}
-
-      {status && <p className="ft-muted" style={{ marginTop: 6 }}>{status}</p>}
-    </div>
-  );
-}
-
-function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection, autoFetch, uid, onOpenSettings }) {
+function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection, autoFetch }) {
   const [newCollectionName, setNewCollectionName] = useState("");
-  const [linkInput, setLinkInput] = useState(draft.link || "");  const [fetchState, setFetchState] = useState("idle"); // idle | loading | done | error | locked
+  const [linkInput, setLinkInput] = useState(draft.link || "");
+  const [fetchState, setFetchState] = useState("idle"); // idle | loading | done | error | locked
   const [fetchError, setFetchError] = useState("");
 
   const doFetch = async () => {
     if (!linkInput) return;
     setFetchState("loading");
     try {
-      const parsed = await fetchMetadataFromLink(linkInput, uid);
+      const parsed = await fetchMetadataFromLink(linkInput);
       setDraft((d) => {
         let seriesEntries = d.seriesEntries || [];
         if (parsed.seriesName) {
@@ -904,7 +719,7 @@ function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection
           warnings: parsed.warnings?.length ? parsed.warnings : d.warnings,
           wordCount: parsed.wordCount ?? d.wordCount,
           chapterCurrent: parsed.chapterCurrent ?? d.chapterCurrent,
-          chapterTotal: normalizeChapterTotal(parsed.chapterTotal, d.chapterTotal),
+          chapterTotal: parsed.chapterTotal ?? d.chapterTotal,
           ficStatus: parsed.ficStatus || d.ficStatus,
           dateStarted: parsed.dateStarted || d.dateStarted,
           dateFinished: parsed.dateFinished || d.dateFinished,
@@ -948,11 +763,6 @@ function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection
       return { ...d, collections: has ? d.collections.filter((x) => x !== id) : [...(d.collections || []), id] };
     });
   };
-  const createAndAddCollection = () => {
-    const c = onCreateCollection(newCollectionName.trim());
-    setDraft((d) => ({ ...d, collections: [...(d.collections || []), c.id] }));
-    setNewCollectionName("");
-  };
 
   return (
     <div className="ft-form">
@@ -965,12 +775,6 @@ function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection
                 setLinkInput(e.target.value);
                 setDraft((d) => ({ ...d, link: e.target.value, source: detectSource(e.target.value) }));
               }}
-              onKeyDown={(e) => {
-                if (e.key !== "Enter") return;
-                e.preventDefault();
-                e.stopPropagation();
-                if (linkInput && fetchState !== "loading") doFetch();
-              }}
               placeholder="https://archiveofourown.org/works/..."
             />
             <button type="button" className="ft-btn ft-btn-primary" onClick={doFetch} disabled={fetchState === "loading" || !linkInput}>
@@ -979,22 +783,10 @@ function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection
             </button>
           </div>
         </Field>
+        {fetchState === "done" && <p className="ft-fetch-msg ft-fetch-ok"><Check size={13} /> Filled in below — double check before saving.</p>}
         {fetchState === "locked" && (
           <p className="ft-fetch-msg ft-fetch-warn">
             <AlertTriangle size={13} /> {fetchError || "This work may require an AO3 login — fill in the rest manually."}
-            {onOpenSettings && (
-              <>
-                {" "}
-                <button
-                  type="button"
-                  className="ft-btn ft-btn-ghost"
-                  style={{ marginLeft: 6, padding: "2px 8px", fontSize: 12 }}
-                  onClick={onOpenSettings}
-                >
-                  Add AO3 login
-                </button>
-              </>
-            )}
           </p>
         )}
         {fetchState === "error" && (
@@ -1047,22 +839,7 @@ function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection
       <div className="ft-form-grid ft-form-grid-3">
         <Field label="Word count"><input type="number" min="0" value={draft.wordCount} onChange={setNum("wordCount")} /></Field>
         <Field label="Chapters posted (AO3)" hint="how many chapters exist right now"><input type="number" min="0" value={draft.chapterCurrent} onChange={setNum("chapterCurrent")} /></Field>
-        <Field label="Chapters total (AO3)" hint='planned total when complete — type "?" if AO3 shows an unknown total'>
-          <input
-            type="text"
-            inputMode="numeric"
-            value={draft.chapterTotal}
-            onChange={(e) => {
-              const raw = e.target.value;
-              setDraft((d) => {
-                if (raw === "" || raw === "?") return { ...d, chapterTotal: raw };
-                if (/^\d+$/.test(raw)) return { ...d, chapterTotal: Number(raw) };
-                return d; // ignore anything else (letters, etc.) — only digits or "?" are valid here
-              });
-            }}
-            onBlur={() => setDraft((d) => (d.chapterTotal === "" ? { ...d, chapterTotal: "?" } : d))}
-          />
-        </Field>
+        <Field label="Chapters total (AO3)" hint="planned total when complete; blank if unknown WIP"><input type="number" min="0" value={draft.chapterTotal} onChange={setNum("chapterTotal")} /></Field>
       </div>
 
       <div className="ft-form-grid ft-form-grid-3">
@@ -1075,11 +852,7 @@ function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection
             onChange={(e) => {
               const v = e.target.value === "" ? 0 : Number(e.target.value);
               const capped = Math.max(0, Math.min(v, draft.chapterCurrent || 0));
-              setDraft((d) =>
-                capped === (d.readChapter || 0)
-                  ? d
-                  : { ...d, readChapter: capped, lastReadUrl: "" } // progress no longer matches whatever chapter lastReadUrl pointed to
-              );
+              setDraft((d) => ({ ...d, readChapter: capped }));
             }}
           />
         </Field>
@@ -1179,18 +952,16 @@ function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection
             placeholder="New collection name…"
             value={newCollectionName}
             onChange={(e) => setNewCollectionName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key !== "Enter") return;
-              e.preventDefault();
-              e.stopPropagation();
-              if (newCollectionName.trim()) createAndAddCollection();
-            }}
           />
           <button
             type="button"
             className="ft-btn ft-btn-ghost"
             disabled={!newCollectionName.trim()}
-            onClick={createAndAddCollection}
+            onClick={() => {
+              const c = onCreateCollection(newCollectionName.trim());
+              setDraft((d) => ({ ...d, collections: [...(d.collections || []), c.id] }));
+              setNewCollectionName("");
+            }}
           >
             <Plus size={14} /> Create & add
           </button>
@@ -1242,32 +1013,7 @@ function BulkImportPanel({ payload, existingFics, onClose, onAdd, onSaveSeriesIn
     const wid = ao3WorkId(link);
     return existingFics.find((f) => (wid ? ao3WorkId(f.link) === wid : f.link === link)) || null;
   };
-  const hasStatChanges = (w, existing) =>
-    !!existing && (
-      (w.wordCount || 0) !== (existing.wordCount || 0) ||
-      (w.chapterCurrent || 0) !== (existing.chapterCurrent || 0) ||
-      (w.ficStatus || "") !== (existing.ficStatus || "")
-    );
-  // True when this scrape names a series the existing entry isn't linked to yet — the
-  // case that used to silently go nowhere (stats already matched, so nothing looked
-  // "changed") and was the actual reason people re-added the fic from the other series'
-  // import, creating a real duplicate card instead of just gaining a series link.
-  const missingSeriesLink = (w, existing) =>
-    !!existing && !!w.seriesName && !(existing.seriesEntries || []).some((e) => e.seriesName === w.seriesName);
-  const needsRefresh = (w, existing) => hasStatChanges(w, existing) || missingSeriesLink(w, existing);
-
-  const [refreshChecked, setRefreshChecked] = useState(() => {
-    // Default to refreshing every duplicate whose stats changed, or that's missing a
-    // series link this scrape has — re-importing a series/fic you're already tracking
-    // should update it automatically, not silently leave stale data (or an unlinked
-    // series) behind because a checkbox went unticked. You can still uncheck individual
-    // rows below if you don't want a particular one touched.
-    const s = new Set();
-    works.forEach((w, i) => {
-      if (isExistingDup(w.link) && needsRefresh(w, findExistingFic(w.link))) s.add(i);
-    });
-    return s;
-  });
+  const [refreshChecked, setRefreshChecked] = useState(new Set()); // indexes of duplicate rows to refresh
   const toggleRefresh = (i) =>
     setRefreshChecked((prev) => {
       const n = new Set(prev);
@@ -1288,9 +1034,6 @@ function BulkImportPanel({ payload, existingFics, onClose, onAdd, onSaveSeriesIn
   // library (with no further warning) is exactly how this produced duplicate fics before.
   const toggleAll = () => setChecked(allChecked ? new Set() : new Set(newIndexes));
 
-  const [markAsRec, setMarkAsRec] = useState(false);
-  const [recommendedBy, setRecommendedBy] = useState("");
-
   const handleAdd = () => {
     const seriesLinks = {}; // seriesName -> AO3 link, collected so the caller can auto-fill new series entries
     // Final safety net: re-verify right here, at the actual moment of commit — not just
@@ -1308,15 +1051,13 @@ function BulkImportPanel({ payload, existingFics, onClose, onAdd, onSaveSeriesIn
         fandoms: w.fandoms || [], relationships: w.relationships || [],
         characters: w.characters || [], rating: w.rating || "T",
         warnings: w.warnings || [], wordCount: w.wordCount || 0,
-        chapterCurrent: w.chapterCurrent || 0, chapterTotal: normalizeChapterTotal(w.chapterTotal, 1),
-        ficStatus: inferFicStatus(w.ficStatus, w.chapterCurrent, w.chapterTotal),
+        chapterCurrent: w.chapterCurrent || 0, chapterTotal: w.chapterTotal || 1,
+        ficStatus: w.ficStatus || "Complete",
         dateStarted: w.dateStarted || "", dateFinished: w.dateFinished || "",
         lastUpdated: w.lastUpdated || "", summary: w.summary || "",
         tags: w.tags || [],
         seriesEntries: w.seriesName ? [{ seriesName: w.seriesName, seriesPosition: w.seriesPosition ?? "" }] : [],
         notes: "", rating_personal: "", currentChapter: 0, collections: [],
-        addedVia: markAsRec ? "rec" : "self",
-        recommendedBy: markAsRec ? recommendedBy.trim() : "",
       };
     });
     const refreshes = Array.from(refreshChecked)
@@ -1336,30 +1077,22 @@ function BulkImportPanel({ payload, existingFics, onClose, onAdd, onSaveSeriesIn
           {works.length} work{works.length !== 1 ? "s" : ""} found.
           {" "}{checked.size} selected to add.
           {" "}{refreshChecked.size > 0 && `${refreshChecked.size} selected to refresh. `}
-          Rows already in your library that have changed — including just gaining a series link this scrape has — are pre-checked to refresh; uncheck any you don't want touched.
+          Rows already in your library show what's changed, with a checkbox to refresh just that fic's stats.
         </p>
-        <div style={{ padding: "0 18px 10px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-            <input type="checkbox" checked={markAsRec} onChange={(e) => setMarkAsRec(e.target.checked)} />
-            Mark all added fics as recs
-          </label>
-          {markAsRec && (
-            <input
-              placeholder="Recommended by… (optional)"
-              value={recommendedBy}
-              onChange={(e) => setRecommendedBy(e.target.value)}
-              style={{ maxWidth: 220 }}
-            />
-          )}
-        </div>
-        {works.some((w, i) => needsRefresh(w, isExistingDup(w.link) ? findExistingFic(w.link) : null)) && (
+        {works.some((w, i) => isExistingDup(w.link) && findExistingFic(w.link) && (
+          (w.wordCount || 0) !== (findExistingFic(w.link).wordCount || 0) ||
+          (w.chapterCurrent || 0) !== (findExistingFic(w.link).chapterCurrent || 0)
+        )) && (
           <div style={{ padding: "0 18px 8px" }}>
             <button
               className="ft-pill"
               onClick={() => {
-                const changedIndexes = works.map((w, i) => i).filter((i) =>
-                  isExistingDup(works[i].link) && needsRefresh(works[i], findExistingFic(works[i].link))
-                );
+                const changedIndexes = works.map((w, i) => i).filter((i) => {
+                  if (!isExistingDup(works[i].link)) return false;
+                  const existing = findExistingFic(works[i].link);
+                  if (!existing) return false;
+                  return (works[i].wordCount || 0) !== (existing.wordCount || 0) || (works[i].chapterCurrent || 0) !== (existing.chapterCurrent || 0);
+                });
                 setRefreshChecked(new Set(changedIndexes));
               }}
             >
@@ -1395,14 +1128,18 @@ function BulkImportPanel({ payload, existingFics, onClose, onAdd, onSaveSeriesIn
               {works.map((w, i) => {
                 const isDup = isExistingDup(w.link);
                 const existing = isDup ? findExistingFic(w.link) : null;
-                const statsChanged = hasStatChanges(w, existing);
-                const seriesMissing = missingSeriesLink(w, existing);
-                const needsAttention = statsChanged || seriesMissing;
+                const hasChanges = existing && (
+                  (w.wordCount || 0) !== (existing.wordCount || 0) ||
+                  (w.chapterCurrent || 0) !== (existing.chapterCurrent || 0) ||
+                  (w.ficStatus || "") !== (existing.ficStatus || "")
+                );
                 return (
-                  <tr key={i} style={{ opacity: isDup && !needsAttention ? 0.4 : 1, borderBottom: "1px solid var(--c-border)" }}>
+                  <tr key={i} style={{ opacity: isDup && !hasChanges ? 0.4 : 1, borderBottom: "1px solid var(--c-border)" }}>
                     <td style={{ padding: "5px 8px 5px 0" }}>
                       {isDup ? (
-                        <input type="checkbox" checked={refreshChecked.has(i)} onChange={() => toggleRefresh(i)} title="Refresh this fic's stats / series links" />
+                        hasChanges ? (
+                          <input type="checkbox" checked={refreshChecked.has(i)} onChange={() => toggleRefresh(i)} title="Refresh this fic's stats" />
+                        ) : null
                       ) : (
                         <input type="checkbox" checked={checked.has(i)} onChange={() => toggle(i)} />
                       )}
@@ -1413,10 +1150,8 @@ function BulkImportPanel({ payload, existingFics, onClose, onAdd, onSaveSeriesIn
                       </a>
                       {isDup && (
                         <span className="ft-muted" style={{ marginLeft: 6 }}>
-                          {statsChanged
-                            ? `(in library — ${existing.wordCount || 0} → ${w.wordCount || 0} words${(w.chapterCurrent || 0) !== (existing.chapterCurrent || 0) ? `, ${existing.chapterCurrent || 0}→${w.chapterCurrent || 0} ch.` : ""}${seriesMissing ? `, adds Part ${w.seriesPosition} of ${w.seriesName}` : ""})`
-                            : seriesMissing
-                            ? `(in library — adds Part ${w.seriesPosition} of ${w.seriesName})`
+                          {hasChanges
+                            ? `(in library — ${existing.wordCount || 0} → ${w.wordCount || 0} words${(w.chapterCurrent || 0) !== (existing.chapterCurrent || 0) ? `, ${existing.chapterCurrent || 0}→${w.chapterCurrent || 0} ch.` : ""})`
                             : "(already in library, up to date)"}
                         </span>
                       )}
@@ -1619,23 +1354,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // ---- undo: an in-memory (not persisted — resets on reload, which is fine for "I just
-  // made a mistake") stack of recent library-changing actions. Every persistFics call
-  // pushes one automatically (see persistFics below); undoing one reverts exactly that
-  // diff — restoring anything it removed from trash, putting changed fics back to their
-  // prior values, and removing anything it added (which itself routes back through
-  // persistFics, so even an undone addition is trash-recoverable, not a hard delete).
-  const MAX_UNDO = 20;
-  const [undoStack, setUndoStack] = useState([]);
-  const undoStackRef = useRef([]);
-  const [undoOpen, setUndoOpen] = useState(false);
-  const [duplicatesOpen, setDuplicatesOpen] = useState(false);
-  const pushUndo = useCallback((entry) => {
-    const next = [entry, ...undoStackRef.current].slice(0, MAX_UNDO);
-    undoStackRef.current = next;
-    setUndoStack(next);
-  }, []);
-
   /* ---- handle the "Add to Library" bookmarklet's ?add=<url> param ----
      Opens the Add modal immediately with the link filled in, then tells FicForm to run
      its own "Fetch details" automatically (same fetchState loading/error/locked UI you
@@ -1669,18 +1387,9 @@ function Tracker({ uid, userEmail, onSignOut }) {
   useEffect(() => {
     if (!loaded || addDataProcessed.current) return;
     const params = new URLSearchParams(window.location.search);
-    if (!params.has("addData")) return; // param not present at all — nothing to do, stay quiet
     const addData = params.get("addData");
+    if (!addData) return;
     addDataProcessed.current = true;
-
-    if (!addData) {
-      // Param was present but empty — the Shortcut/bookmarklet ran but didn't actually
-      // produce any data, which used to fail completely silently here.
-      setToast({ kind: "warn", text: "That import link didn't include any fic data — try sharing the page again, and make sure it fully loaded first." });
-      params.delete("addData");
-      window.history.replaceState({}, "", window.location.pathname + (params.toString() ? `?${params.toString()}` : ""));
-      return;
-    }
 
     try {
       const json = decodeURIComponent(escape(atob(addData)));
@@ -1710,8 +1419,8 @@ function Tracker({ uid, userEmail, onSignOut }) {
         warnings: parsed.warnings || [],
         wordCount: parsed.wordCount ?? 0,
         chapterCurrent: parsed.chapterCurrent ?? 0,
-        chapterTotal: normalizeChapterTotal(parsed.chapterTotal, 1),
-        ficStatus: inferFicStatus(parsed.ficStatus, parsed.chapterCurrent, parsed.chapterTotal),
+        chapterTotal: parsed.chapterTotal ?? 1,
+        ficStatus: parsed.ficStatus || "Complete",
         dateStarted: parsed.dateStarted || "",
         dateFinished: parsed.dateFinished || "",
         lastUpdated: parsed.lastUpdated || "",
@@ -1735,17 +1444,12 @@ function Tracker({ uid, userEmail, onSignOut }) {
   useEffect(() => {
     if (!loaded) return;
     const params = new URLSearchParams(window.location.search);
-    if (!params.has("addBulk")) return;
     const addBulk = params.get("addBulk");
+    if (!addBulk) return;
 
     params.delete("addBulk");
     const cleanUrl3 = window.location.pathname + (params.toString() ? `?${params.toString()}` : "");
     window.history.replaceState({}, "", cleanUrl3);
-
-    if (!addBulk) {
-      setToast({ kind: "warn", text: "That import link didn't include any fic data — try sharing the page again, and make sure it fully loaded first." });
-      return;
-    }
 
     try {
       const json = decodeURIComponent(escape(atob(addBulk)));
@@ -1777,28 +1481,13 @@ function Tracker({ uid, userEmail, onSignOut }) {
   // firebase.js. Every existing call site keeps working exactly as before
   // (persistFics((prev) => ...) or persistFics(value)); only the persistence underneath
   // changed, from "rewrite the whole library every time" to "touch only what changed".
-  const persistFics = useCallback(async (updaterOrValue, opts = {}) => {
+  const persistFics = useCallback(async (updaterOrValue) => {
     const prev = ficsRef.current;
-    let next = typeof updaterOrValue === "function" ? updaterOrValue(prev) : updaterOrValue;
-
-    const prevById = new Map(prev.map((f) => [f.id, f]));
-
-    // Stamp any fic that's new or actually changed with when it was last touched — status
-    // changes, edits, progress updates, imports, all count. Powers the "Recently interacted"
-    // sort. Skipped when reverting via undo, since restoring old values isn't a fresh
-    // interaction with the fic — it should keep whatever timestamp it had before the change
-    // being undone.
-    if (!opts.skipUndo) {
-      const now = new Date().toISOString();
-      next = next.map((f) => {
-        const old = prevById.get(f.id);
-        return !old || old !== f ? { ...f, lastInteractedAt: now } : f;
-      });
-    }
-
+    const next = typeof updaterOrValue === "function" ? updaterOrValue(prev) : updaterOrValue;
     ficsRef.current = next;
     setFics(next);
 
+    const prevById = new Map(prev.map((f) => [f.id, f]));
     const nextById = new Map(next.map((f) => [f.id, f]));
 
     const upserts = [];
@@ -1814,35 +1503,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
 
     if (upserts.length === 0 && removedFics.length === 0) return; // nothing actually changed
 
-    // Classify each upsert as a brand-new fic (wasn't in prev — undo removes it) or an
-    // edit to an existing one (undo restores its prior values) — then record the whole
-    // diff as one undo-able entry, unless this call is itself a revert (skipUndo), to
-    // avoid an undo creating its own undoable "undo the undo" noise in the stack.
-    if (!opts.skipUndo) {
-      const added = [];
-      const changed = [];
-      for (const fic of upserts) {
-        const old = prevById.get(fic.id);
-        if (old) changed.push({ id: fic.id, prevFic: old });
-        else added.push(fic.id);
-      }
-      const parts = [];
-      if (added.length === 1) parts.push(`added "${truncateTitle(upserts.find((u) => u.id === added[0])?.title)}"`);
-      else if (added.length > 1) parts.push(`added ${added.length} fics`);
-      if (changed.length === 1) parts.push(`updated "${truncateTitle(changed[0].prevFic.title)}"`);
-      else if (changed.length > 1) parts.push(`updated ${changed.length} fics`);
-      if (removedFics.length === 1) parts.push(`deleted "${truncateTitle(removedFics[0].title)}"`);
-      else if (removedFics.length > 1) parts.push(`deleted ${removedFics.length} fics`);
-      pushUndo({
-        id: genId(),
-        ts: Date.now(),
-        label: opts.label || parts.join(", ") || "Library change",
-        added,
-        changed,
-        removed: removedFics,
-      });
-    }
-
     writingRef.current += 1;
     try {
       await saveFicsDiff(uid, upserts, removedFics);
@@ -1854,67 +1514,13 @@ function Tracker({ uid, userEmail, onSignOut }) {
     } finally {
       writingRef.current -= 1;
     }
-  }, [uid, pushUndo]);
+  }, [uid]);
 
   // Kept as a separate name since call sites already use it to document intent ("these
   // are brand new") — it's now just a thin wrapper over the same diffing persistFics,
   // since prepending new fics to `prev` is exactly the kind of change persistFics already
   // detects and writes correctly (as upserts, since their ids won't be in prevById).
   const persistFicsAppend = useCallback((newFics) => persistFics((prev) => [...newFics, ...prev]), [persistFics]);
-
-  /* ---- handle the reading-progress bookmarklet's ?updateProgress=<base64 json> param ----
-     Unlike add/addBulk, this applies directly with no review step — it's just "which
-     chapter am I on", low-risk and annoying to have to confirm every time you read. */
-  useEffect(() => {
-    if (!loaded) return;
-    const params = new URLSearchParams(window.location.search);
-    if (!params.has("updateProgress")) return;
-    const raw = params.get("updateProgress");
-
-    params.delete("updateProgress");
-    const cleanUrl4 = window.location.pathname + (params.toString() ? `?${params.toString()}` : "");
-    window.history.replaceState({}, "", cleanUrl4);
-
-    if (!raw) {
-      setToast({ kind: "warn", text: "That progress-update link didn't include any data — try again from AO3." });
-      return;
-    }
-
-    try {
-      const json = decodeURIComponent(escape(atob(raw)));
-      const data = JSON.parse(json);
-      const match = findDuplicate({ link: data.link || "" }, ficsRef.current, null);
-      if (!match) {
-        setToast({ kind: "warn", text: "That fic isn't in your library yet — add it first, then update progress." });
-        return;
-      }
-      const hasChapterNum = data.chapterNumber !== undefined && data.chapterNumber !== null;
-      const chapterNum = hasChapterNum
-        ? Math.max(0, Math.min(data.chapterNumber, match.chapterCurrent || data.chapterNumber || 0))
-        : (match.readChapter || 0); // couldn't detect a chapter number on AO3's page — leave progress as-is
-      persistFics((prev) =>
-        prev.map((f) => {
-          if (f.id !== match.id) return f;
-          const patch = { lastReadUrl: data.chapterUrl || f.lastReadUrl };
-          if (hasChapterNum) patch.readChapter = chapterNum;
-          // Only auto-promote to Currently Reading from a resting state — don't override
-          // Caught Up/Completed/Abandoned/On Hold just because a progress link got clicked.
-          if (f.readingStatus === "Unread") patch.readingStatus = "Currently Reading";
-          return { ...f, ...patch };
-        })
-      );
-      setToast({
-        kind: hasChapterNum ? "ok" : "warn",
-        text: hasChapterNum
-          ? `Updated "${truncateTitle(match.title)}" to chapter ${chapterNum}.`
-          : `Saved your spot in "${truncateTitle(match.title)}", but couldn't detect the chapter number — check it's still right.`,
-        undoIds: undoStackRef.current[0] ? [undoStackRef.current[0].id] : [],
-      });
-    } catch (e) {
-      console.error("Couldn't parse progress-update data", e);
-      setToast({ kind: "warn", text: "Couldn't read that progress update — try again." });
-    }
-  }, [loaded, persistFics]);
 
   const persistLists = useCallback(async (updaterOrValue) => {
     const next = typeof updaterOrValue === "function" ? updaterOrValue(listsRef.current) : updaterOrValue;
@@ -1933,6 +1539,14 @@ function Tracker({ uid, userEmail, onSignOut }) {
   /* ---- fic CRUD ---- */
   const openAdd = () => setModal({ mode: "add", draft: emptyFic() });
   const openEdit = (fic) => setModal({ mode: "edit", draft: { ...fic } });
+  // Pre-build a Map for O(1) collection name lookups — resolves the (collection) id array
+  // on each fic to the human-readable collection names shown on the card.
+  const collectionById = useMemo(
+    () => new Map((lists.collections || []).map((c) => [c.id, c.name])),
+    [lists.collections]
+  );
+  const ficCollectionNames = (fic) =>
+    (fic.collections || []).map((id) => collectionById.get(id)).filter(Boolean);
 
   // Merges freshly-scraped AO3 data onto an existing fic — used when the bookmarklet (or
   // manual "fetch details") finds you're already tracking this fic, turning what used to
@@ -1940,50 +1554,35 @@ function Tracker({ uid, userEmail, onSignOut }) {
   // Only AO3-sourced fields get overwritten (word count, chapters posted, summary, tags,
   // etc.) — everything you own personally (reading status/progress, notes, collections,
   // when you added it) is left exactly as it was.
-  const refreshFicWithFreshData = (existing, fresh) => {
-    // `fresh` is either a FicForm draft (seriesEntries array — manual edit/single add) or
-    // a raw AO3 scrape (singular seriesName/seriesPosition — bulk bookmarklet). Normalize
-    // to an array either way, then merge rather than overwrite, so refreshing a fic you
-    // already track from Series A — while importing Series B — adds Series B to its
-    // memberships instead of leaving it unlinked (which is what was causing people to
-    // re-add the fic from Series B's import and end up with a genuine duplicate card).
-    const freshSeriesEntries = fresh.seriesEntries || (fresh.seriesName ? [{ seriesName: fresh.seriesName, seriesPosition: fresh.seriesPosition ?? "" }] : []);
-    return {
-      ...existing,
-      title: fresh.title || existing.title,
-      author: fresh.author || existing.author,
-      fandoms: fresh.fandoms?.length ? fresh.fandoms : existing.fandoms,
-      relationships: fresh.relationships?.length ? fresh.relationships : existing.relationships,
-      characters: fresh.characters?.length ? fresh.characters : existing.characters,
-      rating: fresh.rating || existing.rating,
-      warnings: fresh.warnings?.length ? fresh.warnings : existing.warnings,
-      wordCount: fresh.wordCount ?? existing.wordCount,
-      chapterCurrent: fresh.chapterCurrent ?? existing.chapterCurrent,
-      chapterTotal: normalizeChapterTotal(fresh.chapterTotal, existing.chapterTotal),
-      ficStatus: fresh.ficStatus || existing.ficStatus,
-      dateFinished: fresh.dateFinished || existing.dateFinished,
-      lastUpdated: fresh.lastUpdated || existing.lastUpdated,
-      summary: fresh.summary || existing.summary,
-      tags: fresh.tags?.length ? fresh.tags : existing.tags,
-      seriesEntries: mergeSeriesEntries(existing.seriesEntries, freshSeriesEntries),
-    };
-  };
+  const refreshFicWithFreshData = (existing, fresh) => ({
+    ...existing,
+    title: fresh.title || existing.title,
+    author: fresh.author || existing.author,
+    fandoms: fresh.fandoms?.length ? fresh.fandoms : existing.fandoms,
+    relationships: fresh.relationships?.length ? fresh.relationships : existing.relationships,
+    characters: fresh.characters?.length ? fresh.characters : existing.characters,
+    rating: fresh.rating || existing.rating,
+    warnings: fresh.warnings?.length ? fresh.warnings : existing.warnings,
+    wordCount: fresh.wordCount ?? existing.wordCount,
+    chapterCurrent: fresh.chapterCurrent ?? existing.chapterCurrent,
+    chapterTotal: fresh.chapterTotal ?? existing.chapterTotal,
+    ficStatus: fresh.ficStatus || existing.ficStatus,
+    dateFinished: fresh.dateFinished || existing.dateFinished,
+    lastUpdated: fresh.lastUpdated || existing.lastUpdated,
+    summary: fresh.summary || existing.summary,
+    tags: fresh.tags?.length ? fresh.tags : existing.tags,
+  });
 
   const saveFromModal = () => {
     const d = modal.draft;
     if (!d.title.trim()) return;
     const dup = findDuplicate(d, fics, modal.mode === "edit" ? d.id : null);
-    if (dup && modal.mode === "add") return; // only block creating a brand-new duplicate — editing an existing entry can't create one
+    if (dup) return; // blocked — warning banner in the modal already explains why
     if (modal.mode === "add") {
       persistFicsAppend([d]);
     } else {
       persistFics((prev) => prev.map((f) => (f.id === d.id ? d : f)));
     }
-    setToast({
-      kind: "ok",
-      text: modal.mode === "add" ? `Added "${truncateTitle(d.title)}".` : `Saved changes to "${truncateTitle(d.title)}".`,
-      undoIds: undoStackRef.current[0] ? [undoStackRef.current[0].id] : [],
-    });
     setModal(null);
   };
 
@@ -2001,8 +1600,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
      is the one true point of no return in the whole app ---- */
   const restoreTrashFics = async (ficIds) => {
     const idSet = new Set(ficIds);
-    const now = new Date().toISOString();
-    const items = trash.filter((f) => idSet.has(f.id)).map((f) => ({ ...f, lastInteractedAt: now }));
+    const items = trash.filter((f) => idSet.has(f.id));
     if (items.length === 0) return;
     writingRef.current += 1;
     try {
@@ -2035,113 +1633,29 @@ function Tracker({ uid, userEmail, onSignOut }) {
     }
   };
 
-  /* ---- undo: reverts exactly one recorded entry's diff ---- */
-  const undoEntry = useCallback(async (entryId) => {
-    const entry = undoStackRef.current.find((e) => e.id === entryId);
-    if (!entry) return;
-    // Pull it off the stack right away so a slow network (or a double-click) can't apply
-    // the same revert twice.
-    const remaining = undoStackRef.current.filter((e) => e.id !== entryId);
-    undoStackRef.current = remaining;
-    setUndoStack(remaining);
-
-    try {
-      if (entry.removed.length > 0) {
-        writingRef.current += 1;
-        try {
-          await restoreFromTrash(uid, entry.removed);
-          // Optimistic local update, same as restoreTrashFics — don't wait on the next
-          // snapshot for it to feel instant.
-          const idSet = new Set(entry.removed.map((f) => f.id));
-          const cleaned = entry.removed.map((f) => normalizeFic(f));
-          const nextFics = [...cleaned, ...ficsRef.current.filter((f) => !idSet.has(f.id))];
-          ficsRef.current = nextFics;
-          setFics(nextFics);
-          setTrash((prev) => prev.filter((f) => !idSet.has(f.id)));
-        } finally {
-          writingRef.current -= 1;
-        }
-      }
-      if (entry.added.length > 0 || entry.changed.length > 0) {
-        const addedSet = new Set(entry.added);
-        const changedMap = new Map(entry.changed.map((c) => [c.id, c.prevFic]));
-        // skipUndo — this is the revert itself, not a new undoable action.
-        await persistFics(
-          (prev) => prev.filter((f) => !addedSet.has(f.id)).map((f) => (changedMap.has(f.id) ? changedMap.get(f.id) : f)),
-          { skipUndo: true }
-        );
-      }
-      setToast({ kind: "ok", text: `Undid: ${entry.label}.` });
-    } catch (e) {
-      console.error("undo failed", e);
-      setToast({ kind: "warn", text: `Couldn't undo that — ${e?.message || "try again"}.` });
-      // Put it back so they can retry.
-      undoStackRef.current = [entry, ...undoStackRef.current];
-      setUndoStack(undoStackRef.current);
-    }
-  }, [uid, persistFics]);
-
-  /* ---- duplicates: merge a cluster down to one entry, keeping the picked one's reading
-     progress/notes/status and folding in the others' series links, collections, and tags
-     so nothing gets lost — the others go to Trash, same as any other delete. ---- */
-  const mergeDuplicatesInto = (keepId, removeIds) => {
-    const keep = ficsRef.current.find((f) => f.id === keepId);
-    const removed = removeIds.map((id) => ficsRef.current.find((f) => f.id === id)).filter(Boolean);
-    if (!keep || removed.length === 0) return;
-    let seriesEntries = keep.seriesEntries || [];
-    const collections = new Set(keep.collections || []);
-    const tags = new Set(keep.tags || []);
-    removed.forEach((r) => {
-      seriesEntries = mergeSeriesEntries(seriesEntries, r.seriesEntries || []);
-      (r.collections || []).forEach((c) => collections.add(c));
-      (r.tags || []).forEach((t) => tags.add(t));
-    });
-    const merged = { ...keep, seriesEntries, collections: Array.from(collections), tags: Array.from(tags) };
-    const removeSet = new Set(removeIds);
-    persistFics((prev) => prev.filter((f) => !removeSet.has(f.id)).map((f) => (f.id === keepId ? merged : f)));
-    setToast({
-      kind: "ok",
-      text: `Merged ${removed.length} duplicate${removed.length !== 1 ? "s" : ""} into "${truncateTitle(keep.title)}".`,
-      undoIds: undoStackRef.current[0] ? [undoStackRef.current[0].id] : [],
-    });
-  };
-
   // Mark complete bumps readCount by one (every completion counts, not just rereads) and
   // syncs chapter progress to match the total. Read again (Currently Reading on an
   // already-read fic) resets chapter progress to 1. Neither touches dateStarted/dateFinished —
   // those track the fic's own AO3 publish/completion dates, not your personal reading
   // timeline, so they only ever come from the AO3 fetch or manual entry.
   const quickStatus = (id, status) => {
-    const fic = ficsRef.current.find((f) => f.id === id);
     persistFics((prev) =>
       prev.map((f) => {
         if (f.id !== id) return f;
         const patch = { readingStatus: status };
         if (status === "Unread") {
           patch.readChapter = 0;
-          patch.lastReadUrl = ""; // no progress to speak of — nothing to "continue" from
         }
         if (status === "Currently Reading" && (f.readCount || 0) > 0) {
           patch.readChapter = 1; // Read again — restart from the top
-          patch.lastReadUrl = f.link; // ...and "continue reading" should also start over, not jump back to wherever the last read-through left off
-        }
-        if (status === "Caught Up") {
-          patch.readChapter = f.chapterCurrent || 0; // caught up on everything posted so far — doesn't bump readCount, since the fic itself isn't done
-          // lastReadUrl deliberately untouched — stays on whatever chapter you last updated
-          // progress to, so "continue reading" still lands you at the latest chapter when
-          // the fic updates, instead of resetting to the top like a real completion does.
         }
         if (status === "Completed") {
           patch.readChapter = f.chapterCurrent || 0; // caught up on everything posted so far
           patch.readCount = (f.readCount || 0) + 1;
-          patch.lastReadUrl = f.link; // done — "continue reading" (a reread) should start back at chapter 1, not the last chapter of the previous read
         }
         return { ...f, ...patch };
       })
     );
-    if (fic) {
-      setToast({ kind: "ok", text: `Marked "${truncateTitle(fic.title)}" as ${status}.`, undoIds: undoStackRef.current[0] ? [undoStackRef.current[0].id] : [] });
-    }
   };
 
   // Same patching rules as quickStatus, applied to many fics in a single write — used by
@@ -2154,24 +1668,17 @@ function Tracker({ uid, userEmail, onSignOut }) {
         const patch = { readingStatus: status };
         if (status === "Unread") {
           patch.readChapter = 0;
-          patch.lastReadUrl = "";
         }
         if (status === "Currently Reading" && (f.readCount || 0) > 0) {
           patch.readChapter = 1;
-          patch.lastReadUrl = f.link;
-        }
-        if (status === "Caught Up") {
-          patch.readChapter = f.chapterCurrent || 0;
         }
         if (status === "Completed") {
           patch.readChapter = f.chapterCurrent || 0;
           patch.readCount = (f.readCount || 0) + 1;
-          patch.lastReadUrl = f.link;
         }
         return { ...f, ...patch };
       })
     );
-    setToast({ kind: "ok", text: `Marked ${ficIds.length} fic${ficIds.length !== 1 ? "s" : ""} as ${status}.`, undoIds: undoStackRef.current[0] ? [undoStackRef.current[0].id] : [] });
   };
 
   /* ---- collections / authors ---- */
@@ -2299,7 +1806,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
 
       const ficStatus = csvChTotal
         ? (csvChCurrent === csvChTotal ? "Complete" : "WIP")
-        : (pickField(row, ["ficstatus", "status", "complete"]) || "WIP");
+        : (pickField(row, ["ficstatus", "status", "complete"]) || "Complete");
       const lastUpdated = ficStatus === "WIP" && csvBlurbDate
         ? (() => { const d = new Date(csvBlurbDate); return isNaN(d) ? "" : d.toISOString().slice(0, 10); })()
         : "";
@@ -2319,7 +1826,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
         warnings: csvWarnings,
         wordCount: csvWordNum,
         chapterCurrent: csvChCurrent ?? 0,
-        chapterTotal: normalizeChapterTotal(csvChTotal, 1),
+        chapterTotal: csvChTotal ?? 1,
         ficStatus,
         lastUpdated,
         summary: csvSummary,
@@ -2331,11 +1838,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
       });
     }
 
-    const csvUndoIds = [];
-    if (newFics.length > 0) {
-      persistFicsAppend(newFics);
-      if (undoStackRef.current[0]) csvUndoIds.push(undoStackRef.current[0].id);
-    }
+    if (newFics.length > 0) persistFicsAppend(newFics);
     if (taggedFicIds.length > 0) {
       const taggedSet = new Set(taggedFicIds);
       persistFics((prev) =>
@@ -2345,7 +1848,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
           return fromWorking ? { ...f, collections: fromWorking.collections } : f;
         })
       );
-      if (undoStackRef.current[0]) csvUndoIds.push(undoStackRef.current[0].id);
     }
     persistLists((prev) => {
       const existingIds = new Set(prev.collections.map((c) => c.id));
@@ -2355,7 +1857,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
       return newCollections.length > 0 ? { ...prev, collections: [...prev.collections, ...newCollections] } : prev;
     });
 
-    setCsvImport({ step: "done", added: newFics.length, tagged, failed, shelves: Object.keys(shelfCollectionIds), undoIds: csvUndoIds });
+    setCsvImport({ step: "done", added: newFics.length, tagged, failed, shelves: Object.keys(shelfCollectionIds) });
   };
 
 
@@ -2453,7 +1955,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
       const workUrl = works[i];
       let meta;
       try {
-        meta = await fetchMetadataFromLink(workUrl, uid);
+        meta = await fetchMetadataFromLink(workUrl);
       } catch {
         failed.push(workUrl);
         await sleep(350);
@@ -2488,10 +1990,10 @@ function Tracker({ uid, userEmail, onSignOut }) {
           warnings: meta.warnings || [],
           wordCount: meta.wordCount || 0,
           chapterCurrent: meta.chapterCurrent ?? 0,
-          chapterTotal: normalizeChapterTotal(meta.chapterTotal, 1),
+          chapterTotal: meta.chapterTotal || 1,
           link: workUrl,
           source: "AO3",
-          ficStatus: inferFicStatus(meta.ficStatus, meta.chapterCurrent, meta.chapterTotal),
+          ficStatus: meta.ficStatus || "Complete",
           dateStarted: meta.dateStarted || "",
           dateFinished: meta.dateFinished || "",
           lastUpdated: meta.lastUpdated || "",
@@ -2711,8 +2213,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
     const sorters = {
       dateAdded_desc: (a, b) => (b.dateAdded || "").localeCompare(a.dateAdded || ""),
       dateAdded_asc: (a, b) => (a.dateAdded || "").localeCompare(b.dateAdded || ""),
-      lastInteracted_desc: (a, b) =>
-        (b.lastInteractedAt || b.dateAdded || "").localeCompare(a.lastInteractedAt || a.dateAdded || ""),
       title_asc: (a, b) => a.title.localeCompare(b.title),
       wordCount_desc: (a, b) => (b.wordCount || 0) - (a.wordCount || 0),
       wordCount_asc: (a, b) => (a.wordCount || 0) - (b.wordCount || 0),
@@ -2764,7 +2264,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
       wordsRead: fics.reduce((s, f) => s + wordsReadOf(f), 0),
       completed: fics.filter((f) => f.readingStatus === "Completed").length,
       reading: fics.filter((f) => f.readingStatus === "Currently Reading").length,
-      caughtUp: fics.filter((f) => f.readingStatus === "Caught Up").length,
       totalReads: fics.reduce((s, f) => s + (f.readCount || 0), 0),
       fandoms: freq(fics.flatMap((f) => f.fandoms || [])),
       ships: freq(fics.flatMap((f) => f.relationships || [])),
@@ -2776,30 +2275,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
     () => fics.filter((f) => f.ficStatus === "WIP" && f.readingStatus !== "Abandoned").sort((a, b) => (a.lastUpdated || "9999").localeCompare(b.lastUpdated || "9999")),
     [fics]
   );
-  // The subset of staleWips you've specifically read everything posted of — the ones
-  // worth periodically checking back on, separate from WIPs you haven't started or are
-  // mid-chapter on.
-  const caughtUpWips = useMemo(() => staleWips.filter((f) => f.readingStatus === "Caught Up"), [staleWips]);
-
-  // Same matching rules as findDuplicate (AO3 work id first, falling back to title+author)
-  // but run once across the whole library to surface every cluster of 2+ entries that are
-  // really the same fic — for spotting duplicates that slipped in before the import-side
-  // fixes, not just preventing new ones.
-  const duplicateGroups = useMemo(() => {
-    const byKey = new Map();
-    fics.forEach((f) => {
-      const wid = ao3WorkId(f.link);
-      const key = wid
-        ? `wid:${wid}`
-        : f.title && f.author
-        ? `ta:${f.title.trim().toLowerCase()}|${f.author.trim().toLowerCase()}`
-        : null;
-      if (!key) return;
-      if (!byKey.has(key)) byKey.set(key, []);
-      byKey.get(key).push(f);
-    });
-    return Array.from(byKey.values()).filter((g) => g.length > 1);
-  }, [fics]);
 
   // Grabs the work ID off the current AO3 page, builds the canonical work URL (so it always
   // matches what fetch-fic.js expects, regardless of which chapter/query params you're on),
@@ -2809,11 +2284,9 @@ function Tracker({ uid, userEmail, onSignOut }) {
   // extra request to AO3 at all, so there's nothing for their anti-bot protection to flag)
   // and only falls back to the old server-fetch approach if the page doesn't look like a
   // normal, parseable work page.
-  const addBookmarkletHref = `javascript:(function () { var m = location.pathname.match(/\\/works\\/(\\d+)/); if (!m) { alert('Open this on an AO3 work page first.'); return; } var workId = m[1]; var canonicalUrl = 'https://archiveofourown.org/works/' + workId; var ORIGIN='${typeof window !== "undefined" ? window.location.origin : ""}'; function openViaServerFetch() { window.open(ORIGIN + '/?add=' + encodeURIComponent(canonicalUrl), '_blank'); } try { var RATING_MAP = { 'Not Rated': 'NR', 'General Audiences': 'G', 'Teen And Up Audiences': 'T', 'Mature': 'M', 'Explicit': 'E' }; var MONTHS = { Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12' }; function txt(el) { return el ? el.textContent.trim() : ''; } function tagList(scope, cls) { return Array.from(scope.querySelectorAll('dd.' + cls + ' a.tag, dd.' + cls + ' li a.tag, dd.' + cls + ' li.' + cls + ' a.tag')) .map(function (a) { return a.textContent.trim(); }); } function parseAo3Date(str) { if (!str) return null; str = str.trim(); var iso = str.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/); if (iso) return iso[1] + '-' + iso[2] + '-' + iso[3]; var mm = str.match(/(\\d+)\\s+(\\w+)\\s+(\\d{4})/); if (!mm) return null; var mon = MONTHS[mm[2]] || '01'; return mm[3] + '-' + mon + '-' + ('0' + mm[1]).slice(-2); } function ddAfterDt(label) { var dts = document.querySelectorAll('dl.work.meta.group dt, dl.stats dt'); for (var i = 0; i < dts.length; i++) { if (dts[i].textContent.trim().indexOf(label) === 0) { var dd = dts[i].nextElementSibling; if (dd && dd.tagName === 'DD') return dd; } } return null; } var titleEl = document.querySelector('h2.title.heading'); var title = titleEl ? titleEl.textContent.trim() : ''; var authorEl = document.querySelector('a[rel="author"]'); var author = authorEl ? authorEl.textContent.trim() : ''; if (!title || !author) { openViaServerFetch(); return; } var summaryEl = document.querySelector('div.summary.module blockquote.userstuff'); var summary = summaryEl ? summaryEl.textContent.trim().slice(0, 800) : ''; var ratingDd = ddAfterDt('Rating'); var ratingTag = ratingDd ? ratingDd.querySelector('a.tag') : null; var rating = ratingTag ? (RATING_MAP[ratingTag.textContent.trim()] || null) : null; var warningsDd = ddAfterDt('Archive Warning'); var warnings = warningsDd ? Array.from(warningsDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var fandomDd = ddAfterDt('Fandom'); var fandoms = fandomDd ? Array.from(fandomDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var relDd = ddAfterDt('Relationship'); var relationships = relDd ? Array.from(relDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var charDd = ddAfterDt('Character'); var characters = charDd ? Array.from(charDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var freeDd = ddAfterDt('Additional Tags'); var tags = freeDd ? Array.from(freeDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var wordsDd = document.querySelector('dl.stats dd.words'); var wordCount = wordsDd ? parseInt(wordsDd.textContent.replace(/[^\\d]/g, '')) || 0 : 0; var chaptersDd = document.querySelector('dl.stats dd.chapters'); var chapText = chaptersDd ? chaptersDd.textContent.trim() : ''; var chapM = chapText.match(/(\\d+)\\/(\\d+|\\?)/); var chapterCurrent = chapM ? parseInt(chapM[1]) : null; var chapterTotal = chapM ? (chapM[2] === '?' ? null : parseInt(chapM[2])) : null; var ficStatus = (chapterTotal && chapterCurrent === chapterTotal) ? 'Complete' : (chapterTotal ? 'WIP' : null); var publishedDd = ddAfterDt('Published'); var completedDd = ddAfterDt('Completed'); var updatedDd = ddAfterDt('Updated'); var published = publishedDd ? parseAo3Date(txt(publishedDd)) : null; var completed = completedDd ? parseAo3Date(txt(completedDd)) : null; var updatedRaw = updatedDd ? parseAo3Date(txt(updatedDd)) : null; var dateStarted = published, dateFinished = null, lastUpdated = null; if (chapterTotal === 1) { dateFinished = published; } else if (ficStatus === 'Complete') { dateFinished = completed || published; } else { lastUpdated = updatedRaw || published; } var seriesDd = ddAfterDt('Series'); var seriesList = []; if (seriesDd) { var posSpans = seriesDd.querySelectorAll('span.position'); for (var psi = 0; psi < posSpans.length; psi++) { var ps = posSpans[psi]; var pm2 = ps.textContent.match(/Part\\s*(\\d+)\\s*of/); var sl2 = ps.querySelector('a'); if (sl2) { var href2 = sl2.getAttribute('href') || ''; var link2 = href2.indexOf('http') === 0 ? href2 : 'https://archiveofourown.org' + href2; seriesList.push({ name: sl2.textContent.trim(), position: pm2 ? parseInt(pm2[1]) : null, link: link2 }); } } } var seriesName = seriesList.length > 0 ? seriesList[0].name : null; var seriesPosition = seriesList.length > 0 ? seriesList[0].position : null; var data = { link: canonicalUrl, title: title, author: author, fandoms: fandoms, relationships: relationships, characters: characters, rating: rating, warnings: warnings, wordCount: wordCount, chapterCurrent: chapterCurrent, chapterTotal: chapterTotal, ficStatus: ficStatus, dateStarted: dateStarted, dateFinished: dateFinished, lastUpdated: lastUpdated, summary: summary, tags: tags, seriesName: seriesName, seriesPosition: seriesPosition, seriesList: seriesList }; var json = JSON.stringify(data); var encoded = encodeURIComponent(btoa(unescape(encodeURIComponent(json)))); window.open(ORIGIN + '/?addData=' + encoded, '_blank'); } catch (e) { openViaServerFetch(); } })();`;
+  const addBookmarkletHref = `javascript:(function () { var m = location.pathname.match(/\\/works\\/(\\d+)/); if (!m) { alert('Open this on an AO3 work page first.'); return; } var workId = m[1]; var canonicalUrl = 'https://archiveofourown.org/works/' + workId; var ORIGIN='${typeof window !== "undefined" ? window.location.origin : ""}'; function openViaServerFetch() { window.open(ORIGIN + '/?add=' + encodeURIComponent(canonicalUrl), '_blank'); } try { var RATING_MAP = { 'Not Rated': 'NR', 'General Audiences': 'G', 'Teen And Up Audiences': 'T', 'Mature': 'M', 'Explicit': 'E' }; var MONTHS = { Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12' }; function txt(el) { return el ? el.textContent.trim() : ''; } function tagList(scope, cls) { return Array.from(scope.querySelectorAll('dd.' + cls + ' a.tag, dd.' + cls + ' li a.tag, dd.' + cls + ' li.' + cls + ' a.tag')) .map(function (a) { return a.textContent.trim(); }); } function parseAo3Date(str) { if (!str) return null; var mm = str.match(/(\\d+)\\s+(\\w+)\\s+(\\d{4})/); if (!mm) return null; var mon = MONTHS[mm[2]] || '01'; return mm[3] + '-' + mon + '-' + ('0' + mm[1]).slice(-2); } function ddAfterDt(label) { var dts = document.querySelectorAll('dl.work.meta.group dt'); for (var i = 0; i < dts.length; i++) { if (dts[i].textContent.trim().indexOf(label) === 0) { var dd = dts[i].nextElementSibling; if (dd && dd.tagName === 'DD') return dd; } } return null; } var titleEl = document.querySelector('h2.title.heading'); var title = titleEl ? titleEl.textContent.trim() : ''; var authorEl = document.querySelector('a[rel="author"]'); var author = authorEl ? authorEl.textContent.trim() : ''; if (!title || !author) { openViaServerFetch(); return; } var summaryEl = document.querySelector('div.summary.module blockquote.userstuff'); var summary = summaryEl ? summaryEl.textContent.trim().slice(0, 800) : ''; var ratingDd = ddAfterDt('Rating'); var ratingTag = ratingDd ? ratingDd.querySelector('a.tag') : null; var rating = ratingTag ? (RATING_MAP[ratingTag.textContent.trim()] || null) : null; var warningsDd = ddAfterDt('Archive Warning'); var warnings = warningsDd ? Array.from(warningsDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var fandomDd = ddAfterDt('Fandom'); var fandoms = fandomDd ? Array.from(fandomDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var relDd = ddAfterDt('Relationship'); var relationships = relDd ? Array.from(relDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var charDd = ddAfterDt('Character'); var characters = charDd ? Array.from(charDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var freeDd = ddAfterDt('Additional Tags'); var tags = freeDd ? Array.from(freeDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var wordsDd = document.querySelector('dl.stats dd.words'); var wordCount = wordsDd ? parseInt(wordsDd.textContent.replace(/[^\\d]/g, '')) || 0 : 0; var chaptersDd = document.querySelector('dl.stats dd.chapters'); var chapText = chaptersDd ? chaptersDd.textContent.trim() : ''; var chapM = chapText.match(/(\\d+)\\/(\\d+|\\?)/); var chapterCurrent = chapM ? parseInt(chapM[1]) : null; var chapterTotal = chapM ? (chapM[2] === '?' ? null : parseInt(chapM[2])) : null; var ficStatus = (chapterTotal && chapterCurrent === chapterTotal) ? 'Complete' : (chapterTotal ? 'WIP' : null); var publishedDd = ddAfterDt('Published'); var completedDd = ddAfterDt('Completed'); var updatedDd = ddAfterDt('Updated'); var published = publishedDd ? parseAo3Date(txt(publishedDd)) : null; var completed = completedDd ? parseAo3Date(txt(completedDd)) : null; var updatedRaw = updatedDd ? parseAo3Date(txt(updatedDd)) : null; var dateStarted = published, dateFinished = null, lastUpdated = null; if (chapterTotal === 1) { dateFinished = published; } else if (ficStatus === 'Complete') { dateFinished = completed || published; } else { lastUpdated = updatedRaw || published; } var seriesDd = ddAfterDt('Series'); var seriesList = []; if (seriesDd) { var posSpans = seriesDd.querySelectorAll('span.position'); for (var psi = 0; psi < posSpans.length; psi++) { var ps = posSpans[psi]; var pm2 = ps.textContent.match(/Part\\s*(\\d+)\\s*of/); var sl2 = ps.querySelector('a'); if (sl2) { var href2 = sl2.getAttribute('href') || ''; var link2 = href2.indexOf('http') === 0 ? href2 : 'https://archiveofourown.org' + href2; seriesList.push({ name: sl2.textContent.trim(), position: pm2 ? parseInt(pm2[1]) : null, link: link2 }); } } } var seriesName = seriesList.length > 0 ? seriesList[0].name : null; var seriesPosition = seriesList.length > 0 ? seriesList[0].position : null; var data = { link: canonicalUrl, title: title, author: author, fandoms: fandoms, relationships: relationships, characters: characters, rating: rating, warnings: warnings, wordCount: wordCount, chapterCurrent: chapterCurrent, chapterTotal: chapterTotal, ficStatus: ficStatus, dateStarted: dateStarted, dateFinished: dateFinished, lastUpdated: lastUpdated, summary: summary, tags: tags, seriesName: seriesName, seriesPosition: seriesPosition, seriesList: seriesList }; var json = JSON.stringify(data); var encoded = encodeURIComponent(btoa(unescape(encodeURIComponent(json)))); window.open(ORIGIN + '/?addData=' + encoded, '_blank'); } catch (e) { openViaServerFetch(); } })();`;
 
-  const addBulkBookmarkletHref = `javascript:(function(){var ORIGIN='${typeof window !== "undefined" ? window.location.origin : ""}';var RATING_MAP={'Not Rated':'NR','General Audiences':'G','Teen And Up Audiences':'T','Mature':'M','Explicit':'E'};var MONTHS={Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};function txt(el){return el?el.textContent.trim():'';}function tagList(li,cls){return Array.from(li.querySelectorAll('ul.tags.commas li.'+cls+' a.tag')).map(function(a){return a.textContent.trim();});}function parseDate(s){var m=s.match(/(\\d+)\\s+(\\w+)\\s+(\\d{4})/);if(!m)return null;var mn=MONTHS[m[2]]||'01';return m[3]+'-'+mn+'-'+('0'+m[1]).slice(-2);}var isSeriesPage=/^\\/series\\/\\d+/.test(location.pathname);var seriesPageTitle='';var seriesPageLink='';if(isSeriesPage){var sTitleEl=document.querySelector('h2.heading');seriesPageTitle=sTitleEl?sTitleEl.textContent.trim():'';var sIdMatch=location.pathname.match(/\\/series\\/(\\d+)/);seriesPageLink=sIdMatch?'https://archiveofourown.org/series/'+sIdMatch[1]:'';}var seriesPageCompleted=null;var seriesPageDescription='';if(isSeriesPage){var allDts=document.querySelectorAll('dt');for(var di=0;di<allDts.length;di++){var dtTxt=allDts[di].textContent.trim();if(dtTxt==='Complete:'){var cdd=allDts[di].nextElementSibling;if(cdd&&cdd.tagName==='DD'){var ctxt=cdd.textContent.trim();seriesPageCompleted=ctxt==='Yes'?true:(ctxt==='No'?false:null);}}else if(dtTxt==='Description:'){var ddd=allDts[di].nextElementSibling;if(ddd&&ddd.tagName==='DD'){var bq=ddd.querySelector('blockquote');seriesPageDescription=(bq||ddd).textContent.trim();}}}}var seriesPageIdx=0;var entries=document.querySelectorAll('li.work.blurb.group,li.bookmark.blurb.group');if(!entries.length){alert('No works found. Use on a series, collection, or search results page.');return;}var works=[];entries.forEach(function(li){var workId=null;var im=li.id.match(/work_(\\d+)/);if(im)workId=im[1];else{var cm=li.className.match(/work-(\\d+)/);if(cm)workId=cm[1];}if(!workId)return;var titleEl=li.querySelector('h4.heading a:not([rel="author"])');var title=titleEl?titleEl.textContent.trim():'';if(!title)return;var authorEl=li.querySelector('h4.heading a[rel="author"]');var ratingSpan=li.querySelector('ul.required-tags span[class*="rating-"]');var ratingTxt=ratingSpan?ratingSpan.getAttribute('title'):'';var rating=RATING_MAP[ratingTxt]||null;var statusSpan=li.querySelector('ul.required-tags span[class*="complete-"]');var ficStatus=statusSpan?(statusSpan.getAttribute('title')==='Complete Work'?'Complete':'WIP'):null;var wordsEl=li.querySelector('dd.words');var wordCount=wordsEl?parseInt(wordsEl.textContent.replace(/,/g,''))||0:0;var chapEl=li.querySelector('dd.chapters');var chapM=(chapEl?chapEl.textContent.trim():'').match(/(\\d+)\\/(\\d+|\\?)/);var chapterCurrent=chapM?parseInt(chapM[1]):null;var chapterTotal=chapM?(chapM[2]==='?'?null:parseInt(chapM[2])):null;if(!ficStatus&&chapterTotal)ficStatus=chapterCurrent===chapterTotal?'Complete':'WIP';var dateEl=li.querySelector('p.datetime');var dateStr=parseDate(txt(dateEl));var summaryEl=li.querySelector('blockquote.userstuff.summary');var summary=summaryEl?summaryEl.textContent.trim().slice(0,250):'';var seriesName=null,seriesPosition=null,seriesLink=null;if(isSeriesPage){seriesName=seriesPageTitle||null;seriesPageIdx++;seriesPosition=seriesPageIdx;seriesLink=seriesPageLink||null;}else{var seriesLi=li.querySelector('ul.series li');if(seriesLi){var pm=seriesLi.textContent.match(/Part\\\\s+(\\\\d+)\\\\s+of/);var sl=seriesLi.querySelector('a');seriesPosition=pm?parseInt(pm[1]):null;seriesName=sl?sl.textContent.trim():null;if(sl){var href3=sl.getAttribute('href')||'';seriesLink=href3.indexOf('http')===0?href3:'https://archiveofourown.org'+href3;}}}works.push({link:'https://archiveofourown.org/works/'+workId,title:title,author:txt(authorEl),fandoms:Array.from(li.querySelectorAll('h5.fandoms.heading a.tag')).map(function(a){return a.textContent.trim();}),relationships:tagList(li,'relationships'),characters:tagList(li,'characters'),rating:rating,warnings:tagList(li,'warnings'),wordCount:wordCount,chapterCurrent:chapterCurrent,chapterTotal:chapterTotal,ficStatus:ficStatus,dateStarted:dateStr,dateFinished:ficStatus==='Complete'?dateStr:null,lastUpdated:ficStatus!=='Complete'?dateStr:null,summary:summary,tags:tagList(li,'freeforms'),seriesName:seriesName,seriesPosition:seriesPosition,seriesLink:seriesLink});});if(!works.length){alert('Could not extract works from this page.');return;}var pageTitleEl=document.querySelector('h2.heading');var payload={works:works,sourceTitle:pageTitleEl?pageTitleEl.textContent.trim():'',sourcePage:location.href,sourceCompleted:seriesPageCompleted,sourceDescription:seriesPageDescription};var json=JSON.stringify(payload);var encoded=encodeURIComponent(btoa(unescape(encodeURIComponent(json))));if(encoded.length>60000){works.forEach(function(w){w.summary='';});json=JSON.stringify({works:works,sourceTitle:payload.sourceTitle,sourcePage:payload.sourcePage});encoded=encodeURIComponent(btoa(unescape(encodeURIComponent(json))));}window.open(ORIGIN+'/?addBulk='+encoded,'_blank');})()`;
-  const updateProgressBookmarkletHref = `javascript:(function () { var ORIGIN = '${typeof window !== "undefined" ? window.location.origin : ""}'; var m = location.pathname.match(/\\/works\\/(\\d+)/); if (!m) { alert('Open this on an AO3 fic chapter page first.'); return; } var workId = m[1]; var canonicalUrl = 'https://archiveofourown.org/works/' + workId; var currentUrl = location.href.split('#')[0]; var chapterNum = null; var sel = document.querySelector('select#selected_id'); if (sel && sel.selectedIndex >= 0) { var opt = sel.options[sel.selectedIndex]; if (opt) { var om = opt.textContent.match(/^\\s*(\\d+)\\s*\\./); if (om) chapterNum = parseInt(om[1]); } } if (!chapterNum) { var h3s = document.querySelectorAll('h3.title'); for (var i = 0; i < h3s.length; i++) { var hm = h3s[i].textContent.match(/Chapter\\s+(\\d+)/i); if (hm) { chapterNum = parseInt(hm[1]); break; } } } if (!chapterNum && document.title) { var tm = document.title.match(/Chapter\\s+(\\d+)/i); if (tm) chapterNum = parseInt(tm[1]); } if (!chapterNum && !/\\/chapters\\//.test(location.pathname)) { chapterNum = 1; } var data = { link: canonicalUrl, chapterUrl: currentUrl }; if (chapterNum) data.chapterNumber = chapterNum; var json = JSON.stringify(data); var encoded = encodeURIComponent(btoa(unescape(encodeURIComponent(json)))); window.open(ORIGIN + '/?updateProgress=' + encoded, '_blank'); })();`;
-
+  const addBulkBookmarkletHref = `javascript:(function(){var ORIGIN='${typeof window !== "undefined" ? window.location.origin : ""}';var RATING_MAP={'Not Rated':'NR','General Audiences':'G','Teen And Up Audiences':'T','Mature':'M','Explicit':'E'};var MONTHS={Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};function txt(el){return el?el.textContent.trim():'';}function tagList(li,cls){return Array.from(li.querySelectorAll('ul.tags.commas li.'+cls+' a.tag')).map(function(a){return a.textContent.trim();});}function parseDate(s){var m=s.match(/(\\d+)\\s+(\\w+)\\s+(\\d{4})/);if(!m)return null;var mn=MONTHS[m[2]]||'01';return m[3]+'-'+mn+'-'+('0'+m[1]).slice(-2);}var isSeriesPage=/^\\/series\\/\\d+/.test(location.pathname);var seriesPageTitle='';var seriesPageLink='';if(isSeriesPage){var sTitleEl=document.querySelector('h2.heading');seriesPageTitle=sTitleEl?sTitleEl.textContent.trim():'';var sIdMatch=location.pathname.match(/\\/series\\/(\\d+)/);seriesPageLink=sIdMatch?'https://archiveofourown.org/series/'+sIdMatch[1]:'';}var seriesPageCompleted=null;var seriesPageDescription='';if(isSeriesPage){var allDts=document.querySelectorAll('dt');for(var di=0;di<allDts.length;di++){var dtTxt=allDts[di].textContent.trim();if(dtTxt==='Complete:'){var cdd=allDts[di].nextElementSibling;if(cdd&&cdd.tagName==='DD'){var ctxt=cdd.textContent.trim();seriesPageCompleted=ctxt==='Yes'?true:(ctxt==='No'?false:null);}}else if(dtTxt==='Description:'){var ddd=allDts[di].nextElementSibling;if(ddd&&ddd.tagName==='DD'){var bq=ddd.querySelector('blockquote');seriesPageDescription=(bq||ddd).textContent.trim();}}}}var pageParam=location.search.match(/[?&]page=(\d+)/);var seriesPageIdx=pageParam?(parseInt(pageParam[1])-1)*20:0;var entries=document.querySelectorAll('li.work.blurb.group,li.bookmark.blurb.group');if(!entries.length){alert('No works found. Use on a series, collection, or search results page.');return;}var works=[];entries.forEach(function(li){var workId=null;var im=li.id.match(/work_(\\d+)/);if(im)workId=im[1];else{var cm=li.className.match(/work-(\\d+)/);if(cm)workId=cm[1];}if(!workId)return;var titleEl=li.querySelector('h4.heading a:not([rel="author"])');var title=titleEl?titleEl.textContent.trim():'';if(!title)return;var authorEl=li.querySelector('h4.heading a[rel="author"]');var ratingSpan=li.querySelector('ul.required-tags span[class*="rating-"]');var ratingTxt=ratingSpan?ratingSpan.getAttribute('title'):'';var rating=RATING_MAP[ratingTxt]||null;var statusSpan=li.querySelector('ul.required-tags span[class*="complete-"]');var ficStatus=statusSpan?(statusSpan.getAttribute('title')==='Complete Work'?'Complete':'WIP'):null;var wordsEl=li.querySelector('dd.words');var wordCount=wordsEl?parseInt(wordsEl.textContent.replace(/,/g,''))||0:0;var chapEl=li.querySelector('dd.chapters');var chapM=(chapEl?chapEl.textContent.trim():'').match(/(\\d+)\\/(\\d+|\\?)/);var chapterCurrent=chapM?parseInt(chapM[1]):null;var chapterTotal=chapM?(chapM[2]==='?'?null:parseInt(chapM[2])):null;if(!ficStatus&&chapterTotal)ficStatus=chapterCurrent===chapterTotal?'Complete':'WIP';var dateEl=li.querySelector('p.datetime');var dateStr=parseDate(txt(dateEl));var summaryEl=li.querySelector('blockquote.userstuff.summary');var summary=summaryEl?summaryEl.textContent.trim().slice(0,250):'';var seriesName=null,seriesPosition=null,seriesLink=null;if(isSeriesPage){seriesName=seriesPageTitle||null;seriesPageIdx++;seriesPosition=seriesPageIdx;seriesLink=seriesPageLink||null;}else{var seriesLi=li.querySelector('ul.series li');if(seriesLi){var pm=seriesLi.textContent.match(/Part\\\\s+(\\\\d+)\\\\s+of/);var sl=seriesLi.querySelector('a');seriesPosition=pm?parseInt(pm[1]):null;seriesName=sl?sl.textContent.trim():null;if(sl){var href3=sl.getAttribute('href')||'';seriesLink=href3.indexOf('http')===0?href3:'https://archiveofourown.org'+href3;}}}works.push({link:'https://archiveofourown.org/works/'+workId,title:title,author:txt(authorEl),fandoms:Array.from(li.querySelectorAll('h5.fandoms.heading a.tag')).map(function(a){return a.textContent.trim();}),relationships:tagList(li,'relationships'),characters:tagList(li,'characters'),rating:rating,warnings:tagList(li,'warnings'),wordCount:wordCount,chapterCurrent:chapterCurrent,chapterTotal:chapterTotal,ficStatus:ficStatus,dateStarted:dateStr,dateFinished:ficStatus==='Complete'?dateStr:null,lastUpdated:ficStatus!=='Complete'?dateStr:null,summary:summary,tags:tagList(li,'freeforms'),seriesName:seriesName,seriesPosition:seriesPosition,seriesLink:seriesLink});});if(!works.length){alert('Could not extract works from this page.');return;}var pageTitleEl=document.querySelector('h2.heading');var payload={works:works,sourceTitle:pageTitleEl?pageTitleEl.textContent.trim():'',sourcePage:location.href,sourceCompleted:seriesPageCompleted,sourceDescription:seriesPageDescription};var json=JSON.stringify(payload);var encoded=encodeURIComponent(btoa(unescape(encodeURIComponent(json))));if(encoded.length>60000){works.forEach(function(w){w.summary='';});json=JSON.stringify({works:works,sourceTitle:payload.sourceTitle,sourcePage:payload.sourcePage});encoded=encodeURIComponent(btoa(unescape(encodeURIComponent(json))));}window.open(ORIGIN+'/?addBulk='+encoded,'_blank');})()`;
 
   /* ---------------------------------------------------------------- */
 
@@ -2850,21 +2323,12 @@ function Tracker({ uid, userEmail, onSignOut }) {
       {toast && (
         <div className={"ft-toast" + (toast.kind === "warn" ? " ft-toast-warn" : "")}>
           <span>{toast.text}</span>
-          {toast.undoIds && toast.undoIds.length > 0 && (
-            <button
-              className="ft-pill"
-              style={{ marginLeft: 4 }}
-              onClick={() => { toast.undoIds.forEach((id) => undoEntry(id)); setToast(null); }}
-            >
-              <Undo2 size={12} /> Undo
-            </button>
-          )}
           <button className="ft-iconbtn" onClick={() => setToast(null)}><X size={14} /></button>
         </div>
       )}
 
       <nav className="ft-nav">
-        <div className="ft-brand"><BookOpen size={18} /> <span>Fic Tracker</span></div>
+        <div className="ft-brand"><BookOpen size={18} /> Fic Tracker</div>
         <div className="ft-nav-items">
           {NAV_ITEMS.map((n) => (
             <button
@@ -2872,43 +2336,19 @@ function Tracker({ uid, userEmail, onSignOut }) {
               className={"ft-nav-item" + (tab === n.id ? " ft-nav-item-active" : "")}
               onClick={() => { setTab(n.id); setAuthorFilterName(null); }}
             >
-              <n.icon size={15} /> <span>{n.label}</span>
+              <n.icon size={15} /> {n.label}
             </button>
           ))}
         </div>
-        <div className="ft-nav-actions">
-          {trash.length > 0 && (
-            <button className="ft-iconbtn ft-nav-settings" style={{ position: "relative" }} onClick={() => setTrashOpen(true)} title={`Trash (${trash.length})`}>
-              <Trash2 size={16} />
-              <span className="ft-trash-badge">{trash.length}</span>
-            </button>
-          )}
-          {duplicateGroups.length > 0 && (
-            <button
-              className="ft-iconbtn ft-nav-settings"
-              style={{ position: "relative" }}
-              onClick={() => setDuplicatesOpen(true)}
-              title={`Possible duplicates (${duplicateGroups.length})`}
-            >
-              <Copy size={16} />
-              <span className="ft-trash-badge">{duplicateGroups.length}</span>
-            </button>
-          )}
-          {undoStack.length > 0 && (
-            <button
-              className="ft-iconbtn ft-nav-settings"
-              style={{ position: "relative" }}
-              onClick={() => setUndoOpen(true)}
-              title={`Recent changes (${undoStack.length})`}
-            >
-              <Undo2 size={16} />
-              <span className="ft-trash-badge">{undoStack.length}</span>
-            </button>
-          )}
-          <button className="ft-iconbtn ft-nav-settings" onClick={() => setSettingsOpen(true)} title="Settings">
-            <Settings size={16} />
+        {trash.length > 0 && (
+          <button className="ft-iconbtn ft-nav-settings" style={{ marginLeft: "auto", position: "relative" }} onClick={() => setTrashOpen(true)} title={`Trash (${trash.length})`}>
+            <Trash2 size={16} />
+            <span className="ft-trash-badge">{trash.length}</span>
           </button>
-        </div>
+        )}
+        <button className="ft-iconbtn ft-nav-settings" onClick={() => setSettingsOpen(true)} title="Settings">
+          <Settings size={16} />
+        </button>
       </nav>
 
       <main className="ft-main">
@@ -3015,7 +2455,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
                 <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
                   <option value="dateAdded_desc">Newest added</option>
                   <option value="dateAdded_asc">Oldest added</option>
-                  <option value="lastInteracted_desc">Recently interacted</option>
                   <option value="title_asc">Title A–Z</option>
                   <option value="wordCount_desc">Longest first</option>
                   <option value="wordCount_asc">Shortest first</option>
@@ -3065,6 +2504,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
                       onDelete={deleteFic}
                       onQuickStatus={quickStatus}
                       confirmingDelete={confirmDeleteId === f.id}
+                      collectionNames={ficCollectionNames(f)}
                     />
                   </div>
                 ))
@@ -3133,6 +2573,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
                         persistFics((prev) => prev.filter((f) => !idSet.has(f.id)));
                       }}
                       onBulkMarkStatus={bulkMarkStatus}
+                      ficCollectionNames={ficCollectionNames}
                       onEditFic={openEdit}
                       onDeleteFic={deleteFic}
                       onQuickStatus={quickStatus}
@@ -3194,6 +2635,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
                       persistFics((prev) => prev.filter((f) => !idSet.has(f.id)));
                     }}
                     onBulkMarkStatus={bulkMarkStatus}
+                    ficCollectionNames={ficCollectionNames}
                     allCollections={lists.collections}
                     onEditFic={openEdit}
                     onDeleteFic={deleteFic}
@@ -3250,7 +2692,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
               <div className="ft-stat-card"><span className="ft-stat-num">{fmtNum(stats.wordsRead)}</span><span>Words read</span></div>
               <div className="ft-stat-card"><span className="ft-stat-num">{fmtNum(stats.completed)}</span><span>Completed</span></div>
               <div className="ft-stat-card"><span className="ft-stat-num">{fmtNum(stats.reading)}</span><span>Currently reading</span></div>
-              <div className="ft-stat-card"><span className="ft-stat-num">{fmtNum(stats.caughtUp)}</span><span>Caught up (WIPs)</span></div>
               <div className="ft-stat-card"><span className="ft-stat-num">{fmtNum(stats.totalReads)}</span><span>Total reads</span></div>
               <div className="ft-stat-card"><span className="ft-stat-num">{fmtNum(staleWips.length)}</span><span>Open WIPs</span></div>
             </div>
@@ -3261,22 +2702,12 @@ function Tracker({ uid, userEmail, onSignOut }) {
               <ChartBlock title="Top tags / tropes" data={stats.tags} color="var(--c-blue)" />
             </div>
 
-            {caughtUpWips.length > 0 && (
-              <div className="ft-series-block">
-                <h3>Caught up, waiting on updates</h3>
-                <p className="ft-muted">WIPs you've read everything posted of so far — sorted by least recently updated.</p>
-                <div className="ft-grid">
-                  {caughtUpWips.slice(0, 6).map((f) => <FicCard key={f.id} fic={f} onEdit={openEdit} onDelete={deleteFic} onQuickStatus={quickStatus} confirmingDelete={confirmDeleteId === f.id} />)}
-                </div>
-              </div>
-            )}
-
             {staleWips.length > 0 && (
               <div className="ft-series-block">
                 <h3>WIPs to check on</h3>
                 <p className="ft-muted">Sorted by least recently updated.</p>
                 <div className="ft-grid">
-                  {staleWips.slice(0, 6).map((f) => <FicCard key={f.id} fic={f} onEdit={openEdit} onDelete={deleteFic} onQuickStatus={quickStatus} confirmingDelete={confirmDeleteId === f.id} />)}
+                  {staleWips.slice(0, 6).map((f) => <FicCard key={f.id} fic={f} onEdit={openEdit} onDelete={deleteFic} onQuickStatus={quickStatus} confirmingDelete={confirmDeleteId === f.id} collectionNames={ficCollectionNames(f)} />)}
                 </div>
               </div>
             )}
@@ -3349,75 +2780,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
           </Modal>
         );
       })()}
-
-      {undoOpen && (
-        <Modal title={`Recent changes (${undoStack.length})`} onClose={() => setUndoOpen(false)}>
-          <p className="ft-muted">
-            The last {MAX_UNDO} library-changing actions this session — newest first. Undoing one only reverts that
-            action; it doesn't touch anything you've done since.
-          </p>
-          {undoStack.length === 0 ? (
-            <p className="ft-muted" style={{ marginTop: 12 }}>Nothing to undo right now.</p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 360, overflowY: "auto", marginTop: 10 }}>
-              {undoStack.map((entry) => (
-                <div key={entry.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 8px", border: "1px solid var(--c-border)", borderRadius: 6 }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.label}</div>
-                    <div className="ft-muted" style={{ fontSize: 11 }}>{fmtDate(new Date(entry.ts).toISOString().slice(0, 10))} · {new Date(entry.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</div>
-                  </div>
-                  <button className="ft-pill" onClick={() => undoEntry(entry.id)}>
-                    <Undo2 size={13} /> Undo
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="ft-modal-footer">
-            <button className="ft-btn ft-btn-ghost" onClick={() => setUndoOpen(false)}>Close</button>
-          </div>
-        </Modal>
-      )}
-
-      {duplicatesOpen && (
-        <Modal title={`Possible duplicates (${duplicateGroups.length})`} onClose={() => setDuplicatesOpen(false)} wide>
-          <p className="ft-muted">
-            Entries that share the same AO3 link, or the same title and author. Pick which one to keep — its series
-            links, collections, and tags get the others' merged in (reading progress and notes stay whatever the kept
-            one already has), and the rest go to Trash.
-          </p>
-          {duplicateGroups.length === 0 ? (
-            <p className="ft-muted" style={{ marginTop: 12 }}>None found.</p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 14, maxHeight: 420, overflowY: "auto", marginTop: 10 }}>
-              {duplicateGroups.map((group, gi) => (
-                <div key={gi} style={{ border: "1px solid var(--c-border)", borderRadius: 8, padding: 10 }}>
-                  {group.map((f) => (
-                    <div key={f.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 4px" }}>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.title || "Untitled"}</div>
-                        <div className="ft-muted" style={{ fontSize: 11 }}>
-                          by {f.author} · {fmtNum(f.wordCount)} words · {f.chapterCurrent || 0}/{f.chapterTotal} ch · {f.readingStatus} · added {fmtDate(f.dateAdded)}
-                          {(f.seriesEntries || []).length > 0 && ` · in ${f.seriesEntries.map((e) => e.seriesName).join(", ")}`}
-                        </div>
-                      </div>
-                      <button
-                        className="ft-pill"
-                        onClick={() => mergeDuplicatesInto(f.id, group.filter((o) => o.id !== f.id).map((o) => o.id))}
-                      >
-                        Keep this one
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="ft-modal-footer">
-            <button className="ft-btn ft-btn-ghost" onClick={() => setDuplicatesOpen(false)}>Close</button>
-          </div>
-        </Modal>
-      )}
 
       {showMissingLinks && (
         <Modal title={`Fix ${seriesNeedingLink.length} missing series link${seriesNeedingLink.length !== 1 ? "s" : ""}`} onClose={() => setShowMissingLinks(false)}>
@@ -3570,18 +2932,15 @@ function Tracker({ uid, userEmail, onSignOut }) {
             setToast({ kind: "ok", text: `Saved "${payload.sourceTitle}"'s link${payload.sourceDescription ? " and description" : ""} — no fics were added.` });
           }}
           onAdd={(drafts, seriesLinks, skippedDupCount, refreshes) => {
-            const undoIds = [];
             if (drafts.length > 0) {
               const newFics = drafts.map((d) => ({ ...emptyFic(), ...d, id: genId(), dateAdded: today() }));
               persistFicsAppend(newFics);
-              if (undoStackRef.current[0]) undoIds.push(undoStackRef.current[0].id);
             }
             if (refreshes && refreshes.length > 0) {
               const refreshMap = new Map(refreshes.map((r) => [r.existing.id, r.fresh]));
               persistFics((prev) =>
                 prev.map((f) => (refreshMap.has(f.id) ? refreshFicWithFreshData(f, refreshMap.get(f.id)) : f))
               );
-              if (undoStackRef.current[0]) undoIds.push(undoStackRef.current[0].id);
             }
             // Create/patch a lists.series entry (with the AO3 link already filled in, and the
             // real completion status when this came from a series page) for any series this
@@ -3599,14 +2958,14 @@ function Tracker({ uid, userEmail, onSignOut }) {
             if (drafts.length > 0) parts.push(`added ${drafts.length} fic${drafts.length === 1 ? "" : "s"}`);
             if (refreshes && refreshes.length > 0) parts.push(`refreshed ${refreshes.length} fic${refreshes.length === 1 ? "" : "s"}`);
             const summary = parts.length > 0 ? parts.join(" and ") : "nothing changed";
-            setToast({ kind: "ok", text: `${summary.charAt(0).toUpperCase() + summary.slice(1)}${dupNote}.`, undoIds });
+            setToast({ kind: "ok", text: `${summary.charAt(0).toUpperCase() + summary.slice(1)}${dupNote}.` });
           }}
         />
       )}
       {modal && (() => {
         const dup = findDuplicate(modal.draft, fics, modal.mode === "edit" ? modal.draft.id : null);
         return (
-          <Modal title={modal.mode === "add" ? "Add a fic" : "Edit fic"} onClose={() => setModal(null)} onEnter={saveFromModal} wide>
+          <Modal title={modal.mode === "add" ? "Add a fic" : "Edit fic"} onClose={() => setModal(null)} wide>
             <FicForm
               draft={modal.draft}
               setDraft={(updater) => setModal((m) => ({ ...m, draft: typeof updater === "function" ? updater(m.draft) : updater }))}
@@ -3614,8 +2973,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
               seriesNames={seriesNames}
               onCreateCollection={quickCreateCollection}
               autoFetch={modal.autoFetch}
-              uid={uid}
-              onOpenSettings={() => { setModal(null); setSettingsOpen(true); }}
             />
             {dup && (
               <p className="ft-fetch-msg ft-fetch-warn" style={{ margin: "0 18px" }}>
@@ -3640,7 +2997,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
             )}
             <div className="ft-modal-footer">
               <button className="ft-btn ft-btn-ghost" onClick={() => setModal(null)}>Cancel</button>
-              <button className="ft-btn ft-btn-primary" onClick={saveFromModal} disabled={!modal.draft.title.trim() || (!!dup && modal.mode === "add")}>
+              <button className="ft-btn ft-btn-primary" onClick={saveFromModal} disabled={!modal.draft.title.trim() || !!dup}>
                 {modal.mode === "add" ? "Add fic" : "Save changes"}
               </button>
             </div>
@@ -3698,14 +3055,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
                 </div>
               )}
               <div className="ft-modal-footer">
-                {csvImport.undoIds && csvImport.undoIds.length > 0 && (
-                  <button
-                    className="ft-btn ft-btn-ghost"
-                    onClick={() => { csvImport.undoIds.forEach((id) => undoEntry(id)); setCsvImport(null); }}
-                  >
-                    <Undo2 size={14} /> Undo this import
-                  </button>
-                )}
                 <button className="ft-btn ft-btn-primary" onClick={() => setCsvImport(null)}>Done</button>
               </div>
             </>
@@ -3932,7 +3281,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
           <div className="ft-settings-row">
             <button className="ft-btn ft-btn-ghost" onClick={onSignOut}><LogOut size={14} /> Sign out</button>
           </div>
-          <AO3CredentialsSection uid={uid} />
           <div className="ft-settings-row" style={{ display: "block" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
               <strong style={{ fontSize: 13 }}>Add a fic straight from AO3</strong>
@@ -3974,29 +3322,6 @@ function Tracker({ uid, userEmail, onSignOut }) {
               <Inbox size={14} /> Add Page to Library
             </a>
             <p className="ft-muted" style={{ marginTop: 6 }}>Drag, don't click — use on any AO3 page listing multiple works.</p>
-          </div>
-          <div className="ft-settings-row" style={{ display: "block" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-              <strong style={{ fontSize: 13 }}>Update reading progress</strong>
-              <HelpTooltip>
-                Drag to your bookmarks bar. While reading a fic on AO3 (in chapter-by-chapter view —
-                Preferences on AO3, uncheck "Show entire work at once"), click it on whichever chapter
-                you're currently on. It matches the fic by AO3 link, sets your reading progress to that
-                chapter, and saves the exact chapter link so the fic's title in your library opens back
-                to right where you left off. Marking a fic Completed resets that link back to the start
-                for next time; marking it Caught Up leaves it where it is, since the fic itself isn't
-                done. Only updates fics already in your library — add it first if it isn't there yet.
-              </HelpTooltip>
-            </div>
-            <a
-              href={updateProgressBookmarkletHref}
-              className="ft-btn ft-btn-primary"
-              onClick={(e) => e.preventDefault()}
-              title="Drag this to your bookmarks bar — don't click it here"
-            >
-              <BookOpen size={14} /> Update Progress
-            </a>
-            <p className="ft-muted" style={{ marginTop: 6 }}>Drag, don't click — click it on AO3 while reading a specific chapter.</p>
           </div>
           <div className="ft-settings-row">
             <button className="ft-btn ft-btn-ghost" onClick={exportData}><Download size={14} /> Export JSON</button>
@@ -4157,7 +3482,6 @@ function ChartBlock({ title, data, color }) {
 /* ---------------------------------------------------------------- */
 
 const CSS = `
-html { scrollbar-gutter: stable; }
 .ft-root {
   --c-bg: #111111;
   --c-surface: #1a1a1a;
@@ -4177,7 +3501,6 @@ html { scrollbar-gutter: stable; }
   min-height: 100%;
   display: flex;
   flex-direction: column;
-  width: 100%;
 }
 .ft-loading { align-items: center; justify-content: center; gap: 10px; flex-direction: row; padding: 40px; color: var(--c-text-muted); }
 .ft-spin { animation: ft-spin 1s linear infinite; }
@@ -4189,49 +3512,31 @@ html { scrollbar-gutter: stable; }
   background: var(--c-accent);
   display: flex;
   flex-direction: row;
-  flex-wrap: nowrap;
   align-items: center;
-  padding: 10px 36px 10px 14px;
-  padding-top: calc(10px + env(safe-area-inset-top, 0px));
-  gap: 6px;
-  position: sticky;
-  top: 0;
-  z-index: 40;
+  padding: 0 16px;
+  height: 52px;
+  gap: 2px;
+  overflow-x: auto;
 }
-.ft-brand { font-weight: 800; font-size: 16px; display: flex; align-items: center; gap: 8px; padding: 0; color: #fff; margin-right: 4px; flex-shrink: 0; }
-.ft-nav-items {
-  display: flex; flex-direction: row; align-items: center; gap: 0;
-  flex-shrink: 1; min-width: 0; overflow-x: auto; overflow-y: hidden;
-  scrollbar-width: none; -ms-overflow-style: none;
-}
-.ft-nav-items::-webkit-scrollbar { display: none; }
+.ft-brand { font-weight: 800; font-size: 16px; display: flex; align-items: center; gap: 8px; padding: 0; color: #fff; margin-right: 18px; flex-shrink: 0; }
+.ft-nav-items { display: flex; flex-direction: row; gap: 0; height: 100%; }
 .ft-nav-item {
-  display: flex; align-items: center; gap: 6px;
-  padding: 8px 9px; border-radius: 6px; border: none; background: transparent;
+  display: flex; align-items: center; gap: 7px;
+  padding: 0 12px; border-radius: 0; border: none; background: transparent;
   color: rgba(255,255,255,0.75); font-size: 13px; cursor: pointer; text-align: left;
-  border-bottom: 3px solid transparent; white-space: nowrap; flex-shrink: 0;
+  height: 100%; border-bottom: 3px solid transparent; white-space: nowrap;
 }
 .ft-nav-item:hover { background: rgba(255,255,255,0.08); color: #fff; }
 .ft-nav-item-active { background: transparent; color: #fff; border-bottom-color: #fff; }
-.ft-nav-actions { display: flex; align-items: center; gap: 1px; flex-shrink: 0; margin-left: auto; }
-.ft-nav-settings { flex-shrink: 0; color: rgba(255,255,255,0.85) !important; }
+.ft-nav-settings { margin-left: auto; flex-shrink: 0; color: rgba(255,255,255,0.85) !important; }
 .ft-nav-settings:hover { background: rgba(255,255,255,0.12) !important; color: #fff !important; }
-@media (max-width: 640px) {
-  .ft-nav { padding: 8px 10px 8px 6px; padding-top: calc(8px + env(safe-area-inset-top, 0px)); gap: 4px; }
-  .ft-brand span { display: none; }
-  .ft-brand { margin-right: 2px; }
-  .ft-nav-item { padding: 6px 8px; font-size: 12px; gap: 4px; }
-  .ft-nav-item span { display: none; }
-  .ft-nav-actions { gap: 0; }
-  .ft-nav-actions .ft-iconbtn { padding: 4px; }
-}
 .ft-trash-badge {
   position: absolute; top: -2px; right: -2px; background: var(--c-rose); color: #fff;
   font-size: 10px; font-weight: 700; line-height: 1; border-radius: 999px;
   min-width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; padding: 0 3px;
 }
 
-.ft-main { flex: 1; padding: 20px 24px 40px; overflow-y: auto; overflow-x: hidden; min-width: 0; }
+.ft-main { flex: 1; padding: 20px 24px 40px; overflow-y: auto; min-width: 0; }
 
 .ft-topbar { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 .ft-search { flex: 1; min-width: 180px; display: flex; align-items: center; gap: 8px; background: var(--c-surface); border: 1px solid var(--c-border); border-radius: 8px; padding: 8px 12px; color: var(--c-text-muted); }
@@ -4292,6 +3597,7 @@ html { scrollbar-gutter: stable; }
 .ft-chip { font-size: 10.5px; background: var(--c-surface-raised); color: var(--c-text-muted); border-radius: 4px; padding: 2px 7px; }
 .ft-chip-ship { color: var(--c-rose); }
 .ft-chip-series { color: var(--c-gold); display: inline-flex; align-items: center; gap: 3px; font-weight: 600; }
+.ft-chip-collection { color: var(--c-sage); display: inline-flex; align-items: center; gap: 3px; font-weight: 500; }
 
 .ft-card-meta { display: flex; gap: 6px; flex-wrap: wrap; }
 .ft-badge { font-size: 10px; font-weight: 600; letter-spacing: 0.02em; padding: 2px 7px; border-radius: 10px; color: var(--bc); background: color-mix(in srgb, var(--bc) 18%, transparent); border: 1px solid color-mix(in srgb, var(--bc) 45%, transparent); }
@@ -4336,14 +3642,8 @@ html { scrollbar-gutter: stable; }
 
 .ft-section { max-width: 980px; }
 .ft-section h1 { font-size: 22px; margin: 0 0 16px; }
-.ft-section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; row-gap: 10px; }
+.ft-section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .ft-section-head h1 { margin: 0; }
-.ft-section-head .ft-card-actions { flex-wrap: wrap; flex-shrink: 1; }
-@media (max-width: 640px) {
-  .ft-section-head .ft-card-actions { width: 100%; }
-  .ft-section-head .ft-card-actions .ft-filter-input,
-  .ft-section-head .ft-card-actions select { flex: 1 1 auto; min-width: 0; }
-}
 .ft-muted { color: var(--c-text-muted); font-size: 12.5px; }
 
 .ft-series-block { margin-bottom: 26px; }
