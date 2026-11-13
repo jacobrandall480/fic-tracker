@@ -55,6 +55,7 @@ const NAV_ITEMS = [
 
 const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const today = () => new Date().toISOString().slice(0, 10);
+const nowISO = () => new Date().toISOString(); // full timestamp for interaction ordering
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // UI preferences only (filters, sort, what's collapsed) — not library data, which lives in
@@ -109,6 +110,11 @@ function normalizeFic(f) {
     const entries = next.seriesName ? [{ seriesName: next.seriesName, seriesPosition: next.seriesPosition || "" }] : [];
     next = { ...next, seriesEntries: entries };
   }
+  // Strip any series entries with no name — these accumulate when a bookmarklet adds a
+  // blank series entry that never gets filled in, and show as confusing "#?" chips on cards
+  if (next.seriesEntries.some((e) => !e.seriesName)) {
+    next = { ...next, seriesEntries: next.seriesEntries.filter((e) => e.seriesName) };
+  }
   if (next.readCount === undefined && next.rereadCount !== undefined) {
     next = { ...next, readCount: next.rereadCount };
   }
@@ -146,9 +152,6 @@ const detectSource = (url) => {
   if (url.includes("wattpad.com")) return "Wattpad";
   return "Other";
 };
-// "How far through the fic have you read" — measured against what's actually posted right
-// now (chapterCurrent), not the eventual total (chapterTotal), since you can't have read
-// chapters that haven't been written yet. For a complete fic these are the same number.
 const progressOf = (f) => {
   if (f.chapterCurrent && f.chapterCurrent > 0) {
     return Math.max(0, Math.min(100, Math.round(((f.readChapter || 0) / f.chapterCurrent) * 100)));
@@ -199,7 +202,7 @@ function emptyFic() {
     warnings: [],
     wordCount: 0,
     chapterCurrent: 0, // chapters AO3 has actually posted right now — not your reading progress
-    chapterTotal: 1, // chapters the fic will have once complete (AO3's own stated total)
+    chapterTotal: 0, // chapters the fic will have once complete (0 = unknown/ongoing)
     readChapter: 0, // YOUR reading progress — which posted chapter you're on; capped at chapterCurrent
     link: "",
     source: "AO3",
@@ -209,6 +212,7 @@ function emptyFic() {
     dateStarted: "",
     dateFinished: "",
     lastUpdated: "",
+    lastInteractedAt: "", // ISO date — set when YOU change reading status or progress
     progressPercent: 0,
     readCount: 0,
     tags: [],
@@ -227,7 +231,17 @@ function emptyFic() {
 /* ---------------------------------------------------------------- */
 
 async function fetchMetadataFromLink(url) {
-  const resp = await fetch(`/fetch-fic?url=${encodeURIComponent(url)}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s max — AO3 usually responds in 2-4s
+  let resp;
+  try {
+    resp = await fetch(`/fetch-fic?url=${encodeURIComponent(url)}`, { signal: controller.signal });
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === "AbortError") throw new Error("Timed out after 15 seconds — AO3 may be slow or blocking the request. Try again shortly.");
+    throw e;
+  }
+  clearTimeout(timeoutId);
   let data;
   try {
     data = await resp.json();
@@ -387,18 +401,48 @@ function MultiSelectFilter({ label, options, selected, onChange, placeholder, co
 /* Fic card + edit form                                              */
 /* ---------------------------------------------------------------- */
 
-function FicCard({ fic, onEdit, onDelete, onQuickStatus, confirmingDelete, collectionNames }) {
+function FicCard({ fic, onEdit, onDelete, onQuickStatus, confirmingDelete, collectionNames, onRefresh, onLinkClick, onRefreshError }) {
   const pct = progressOf(fic);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshErr, setRefreshErr] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(false);
+
+  const handleRefresh = async () => {
+    if (!fic.link || !onRefresh) return;
+    setRefreshing(true);
+    setRefreshErr(false);
+    try {
+      await onRefresh(fic);
+    } catch (e) {
+      setRefreshErr(true);
+      setTimeout(() => setRefreshErr(false), 3000);
+      // Also propagate the error message upward so the app can show a toast
+      if (onRefreshError) onRefreshError(e?.message || "Refresh failed — AO3 may be rate-limiting. Try the bookmarklet/shortcut on the AO3 page instead.");
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   return (
     <div className="ft-card">
       <div className="ft-card-top">
         <div className="ft-card-title-wrap">
-          <a href={fic.link || undefined} target="_blank" rel="noreferrer" className="ft-card-title">
+          <a href={fic.link || undefined} target="_blank" rel="noreferrer" className="ft-card-title" onClick={() => onLinkClick && onLinkClick(fic.id)}>
             {fic.title || "Untitled"}
           </a>
           <div className="ft-card-author">by {fic.author || "Unknown"}</div>
         </div>
         <div className="ft-card-actions">
+          {fic.link && onRefresh && (
+            <button
+              className={"ft-iconbtn" + (refreshErr ? " ft-iconbtn-danger-active" : "")}
+              onClick={handleRefresh}
+              title={refreshErr ? "Refresh failed — AO3 may be blocking, try again" : "Refresh stats from AO3"}
+              disabled={refreshing}
+            >
+              {refreshing ? <Loader2 size={15} className="ft-spin" /> : <RotateCcw size={15} />}
+            </button>
+          )}
           <button className="ft-iconbtn" onClick={() => onEdit(fic)} title="Edit">
             <Pencil size={15} />
           </button>
@@ -413,7 +457,7 @@ function FicCard({ fic, onEdit, onDelete, onQuickStatus, confirmingDelete, colle
       </div>
 
       <div className="ft-chiprow">
-        {(fic.seriesEntries || []).map((entry) => (
+        {(fic.seriesEntries || []).filter((e) => e.seriesName).map((entry) => (
           <span key={entry.seriesName} className="ft-chip ft-chip-series">
             <Layers size={11} /> {entry.seriesName} #{entry.seriesPosition || "?"}
           </span>
@@ -439,19 +483,38 @@ function FicCard({ fic, onEdit, onDelete, onQuickStatus, confirmingDelete, colle
         <Badge color="var(--c-gold)"><RotateCcw size={11} /> Read ×{fic.readCount || 0}</Badge>
       </div>
 
+      {fic.summary && fic.summary.trim() && (
+        <div className="ft-card-summary">
+          <p className={summaryOpen ? "ft-card-summary-text" : "ft-card-summary-text ft-card-summary-clamped"}>
+            {fic.summary.trim()}
+          </p>
+          {fic.summary.trim().length > 140 && (
+            <button type="button" className="ft-card-summary-toggle" onClick={() => setSummaryOpen((o) => !o)}>
+              {summaryOpen ? "Show less" : "Show more"}
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="ft-card-bottom">
         <div className="ft-card-progress">
           <ProgressBar pct={pct} color={READING_COLOR[fic.readingStatus]} />
           <span className="ft-card-progress-label">
             {fic.chapterCurrent
-              ? `Read ${fic.readChapter || 0}/${fic.chapterCurrent}${fic.chapterCurrent !== fic.chapterTotal ? ` posted (${fic.chapterTotal} planned)` : ""}`
+              ? `Read ${fic.readChapter || 0}/${fic.chapterCurrent}${fic.chapterCurrent !== fic.chapterTotal
+                  ? ` posted (${fic.chapterTotal ? `${fic.chapterTotal} planned` : "? planned"})`
+                  : ""}`
               : `${pct}%`} · {fmtNum(fic.wordCount)} words
           </span>
         </div>
         <div className="ft-card-dates">
-          {fic.ficStatus === "Complete" && fic.dateFinished
-            ? `Fic finished ${fmtDate(fic.dateFinished)}`
-            : fic.ficStatus !== "Complete" && fic.lastUpdated
+          {fic.ficStatus === "Complete"
+            ? fic.dateFinished
+              ? `Finished ${fmtDate(fic.dateFinished)}`
+              : fic.lastUpdated
+              ? `Updated ${fmtDate(fic.lastUpdated)}`
+              : `Added ${fmtDate(fic.dateAdded)}`
+            : fic.lastUpdated
             ? `Updated ${fmtDate(fic.lastUpdated)}`
             : `Added ${fmtDate(fic.dateAdded)}`}
         </div>
@@ -467,7 +530,11 @@ function FicCard({ fic, onEdit, onDelete, onQuickStatus, confirmingDelete, colle
           </button>
         )}
         {fic.readingStatus !== "Completed" && (
-          <button className="ft-pill" onClick={() => onQuickStatus(fic.id, "Completed")}>Mark complete</button>
+          <button className="ft-pill" onClick={() => onQuickStatus(fic.id, "Completed")}>
+            {(fic.ficStatus === "Complete" && fic.chapterTotal > 0 && fic.chapterCurrent === fic.chapterTotal)
+              ? "Mark complete"
+              : "Caught up"}
+          </button>
         )}
       </div>
     </div>
@@ -477,7 +544,7 @@ function FicCard({ fic, onEdit, onDelete, onQuickStatus, confirmingDelete, colle
 function SeriesBlock({
   name, meta, items, collapsed, onToggleCollapse,
   onAddToCollection, onToggleCompleted, onEdit, onDelete,
-  onBulkDelete, onBulkMarkStatus, onEditFic, onDeleteFic, onQuickStatus, confirmDeleteId, ficCollectionNames,
+  onBulkDelete, onBulkMarkStatus, onEditFic, onDeleteFic, onQuickStatus, confirmDeleteId, ficCollectionNames, onRefreshFic, stampInteraction, onRefreshError,
 }) {
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState(new Set());
@@ -570,7 +637,7 @@ function SeriesBlock({
                     <input type="checkbox" checked={selected.has(f.id)} onChange={() => toggleSelected(f.id)} />
                   </label>
                 )}
-                <FicCard fic={f} onEdit={onEditFic} onDelete={onDeleteFic} onQuickStatus={onQuickStatus} confirmingDelete={confirmDeleteId === f.id} collectionNames={ficCollectionNames ? ficCollectionNames(f) : []} />
+                <FicCard fic={f} onEdit={onEditFic} onDelete={onDeleteFic} onQuickStatus={onQuickStatus} confirmingDelete={confirmDeleteId === f.id} collectionNames={ficCollectionNames ? ficCollectionNames(f) : []} onRefresh={onRefreshFic} onLinkClick={stampInteraction} onRefreshError={onRefreshError} />
               </div>
             ))}
           </div>
@@ -582,7 +649,7 @@ function SeriesBlock({
 
 function CollectionBlock({
   collection, items, collapsed, onToggleCollapse, onEdit, onDelete,
-  onRemoveSelected, onMoveSelected, onBulkDelete, onBulkMarkStatus, allCollections, onEditFic, onDeleteFic, onQuickStatus, confirmDeleteId, ficCollectionNames,
+  onRemoveSelected, onMoveSelected, onBulkDelete, onBulkMarkStatus, allCollections, onEditFic, onDeleteFic, onQuickStatus, confirmDeleteId, ficCollectionNames, onRefreshFic, stampInteraction, onRefreshError,
 }) {
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState(new Set());
@@ -676,7 +743,7 @@ function CollectionBlock({
                     <input type="checkbox" checked={selected.has(f.id)} onChange={() => toggleSelected(f.id)} />
                   </label>
                 )}
-                <FicCard fic={f} onEdit={onEditFic} onDelete={onDeleteFic} onQuickStatus={onQuickStatus} confirmingDelete={confirmDeleteId === f.id} collectionNames={ficCollectionNames ? ficCollectionNames(f) : []} />
+                <FicCard fic={f} onEdit={onEditFic} onDelete={onDeleteFic} onQuickStatus={onQuickStatus} confirmingDelete={confirmDeleteId === f.id} collectionNames={ficCollectionNames ? ficCollectionNames(f) : []} onRefresh={onRefreshFic} onLinkClick={stampInteraction} onRefreshError={onRefreshError} />
               </div>
             ))}
           </div>
@@ -838,8 +905,8 @@ function FicForm({ draft, setDraft, collections, seriesNames, onCreateCollection
 
       <div className="ft-form-grid ft-form-grid-3">
         <Field label="Word count"><input type="number" min="0" value={draft.wordCount} onChange={setNum("wordCount")} /></Field>
-        <Field label="Chapters posted (AO3)" hint="how many chapters exist right now"><input type="number" min="0" value={draft.chapterCurrent} onChange={setNum("chapterCurrent")} /></Field>
-        <Field label="Chapters total (AO3)" hint="planned total when complete; blank if unknown WIP"><input type="number" min="0" value={draft.chapterTotal} onChange={setNum("chapterTotal")} /></Field>
+        <Field label="Chapters posted" hint="how many chapters exist right now"><input type="number" min="0" value={draft.chapterCurrent} onChange={setNum("chapterCurrent")} /></Field>
+        <Field label="Chapters total" hint="planned total when complete; blank if unknown WIP"><input type="number" min="0" value={draft.chapterTotal} onChange={setNum("chapterTotal")} /></Field>
       </div>
 
       <div className="ft-form-grid ft-form-grid-3">
@@ -1044,19 +1111,25 @@ function BulkImportPanel({ payload, existingFics, onClose, onAdd, onSaveSeriesIn
     const skippedDupCount = checked.size - selectedIndexes.length;
     const drafts = selectedIndexes.map((i) => {
       const w = works[i];
-      if (w.seriesName && w.seriesLink) seriesLinks[w.seriesName] = w.seriesLink;
+      if (w.seriesList && w.seriesList.length > 0) {
+        w.seriesList.forEach((s) => { if (s.name && s.link) seriesLinks[s.name] = s.link; });
+      } else if (w.seriesName && w.seriesLink) {
+        seriesLinks[w.seriesName] = w.seriesLink;
+      }
       return {
         link: w.link || "", source: "AO3",
         title: w.title || "", author: w.author || "",
         fandoms: w.fandoms || [], relationships: w.relationships || [],
         characters: w.characters || [], rating: w.rating || "T",
         warnings: w.warnings || [], wordCount: w.wordCount || 0,
-        chapterCurrent: w.chapterCurrent || 0, chapterTotal: w.chapterTotal || 1,
+        chapterCurrent: w.chapterCurrent || 0, chapterTotal: w.chapterTotal || 0,
         ficStatus: w.ficStatus || "Complete",
         dateStarted: w.dateStarted || "", dateFinished: w.dateFinished || "",
         lastUpdated: w.lastUpdated || "", summary: w.summary || "",
         tags: w.tags || [],
-        seriesEntries: w.seriesName ? [{ seriesName: w.seriesName, seriesPosition: w.seriesPosition ?? "" }] : [],
+        seriesEntries: (w.seriesList && w.seriesList.length > 0)
+          ? w.seriesList.map((s) => ({ seriesName: s.name, seriesPosition: s.position ?? "" }))
+          : w.seriesName ? [{ seriesName: w.seriesName, seriesPosition: w.seriesPosition ?? "" }] : [],
         notes: "", rating_personal: "", currentChapter: 0, collections: [],
       };
     });
@@ -1128,10 +1201,17 @@ function BulkImportPanel({ payload, existingFics, onClose, onAdd, onSaveSeriesIn
               {works.map((w, i) => {
                 const isDup = isExistingDup(w.link);
                 const existing = isDup ? findExistingFic(w.link) : null;
+                const incomingSeries = (w.seriesList && w.seriesList.length > 0)
+                  ? w.seriesList.map((s) => s.name).filter(Boolean)
+                  : w.seriesName ? [w.seriesName] : [];
+                const missingSeries = existing
+                  ? incomingSeries.filter((name) => !(existing.seriesEntries || []).some((e) => e.seriesName === name))
+                  : [];
                 const hasChanges = existing && (
                   (w.wordCount || 0) !== (existing.wordCount || 0) ||
                   (w.chapterCurrent || 0) !== (existing.chapterCurrent || 0) ||
-                  (w.ficStatus || "") !== (existing.ficStatus || "")
+                  (w.ficStatus || "") !== (existing.ficStatus || "") ||
+                  missingSeries.length > 0
                 );
                 return (
                   <tr key={i} style={{ opacity: isDup && !hasChanges ? 0.4 : 1, borderBottom: "1px solid var(--c-border)" }}>
@@ -1151,7 +1231,9 @@ function BulkImportPanel({ payload, existingFics, onClose, onAdd, onSaveSeriesIn
                       {isDup && (
                         <span className="ft-muted" style={{ marginLeft: 6 }}>
                           {hasChanges
-                            ? `(in library — ${existing.wordCount || 0} → ${w.wordCount || 0} words${(w.chapterCurrent || 0) !== (existing.chapterCurrent || 0) ? `, ${existing.chapterCurrent || 0}→${w.chapterCurrent || 0} ch.` : ""})`
+                            ? missingSeries.length > 0 && (w.wordCount || 0) === (existing.wordCount || 0)
+                              ? `(in library — missing series: ${missingSeries.join(", ")})`
+                              : `(in library — ${existing.wordCount || 0} → ${w.wordCount || 0} words${(w.chapterCurrent || 0) !== (existing.chapterCurrent || 0) ? `, ${existing.chapterCurrent || 0}→${w.chapterCurrent || 0} ch.` : ""}${missingSeries.length > 0 ? ` + new series` : ""})`
                             : "(already in library, up to date)"}
                         </span>
                       )}
@@ -1392,7 +1474,9 @@ function Tracker({ uid, userEmail, onSignOut }) {
     addDataProcessed.current = true;
 
     try {
-      const json = decodeURIComponent(escape(atob(addData)));
+      // Support both base64-encoded JSON (bookmarklet) and plain URL-encoded JSON (iOS Shortcuts)
+      let json;
+      try { json = decodeURIComponent(escape(atob(addData))); } catch { json = decodeURIComponent(addData); }
       const parsed = JSON.parse(json);
       const seriesEntries = (parsed.seriesList && parsed.seriesList.length > 0)
         ? parsed.seriesList.map((s) => ({ seriesName: s.name, seriesPosition: s.position ?? "" }))
@@ -1419,7 +1503,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
         warnings: parsed.warnings || [],
         wordCount: parsed.wordCount ?? 0,
         chapterCurrent: parsed.chapterCurrent ?? 0,
-        chapterTotal: parsed.chapterTotal ?? 1,
+        chapterTotal: parsed.chapterTotal ?? 0,
         ficStatus: parsed.ficStatus || "Complete",
         dateStarted: parsed.dateStarted || "",
         dateFinished: parsed.dateFinished || "",
@@ -1452,7 +1536,9 @@ function Tracker({ uid, userEmail, onSignOut }) {
     window.history.replaceState({}, "", cleanUrl3);
 
     try {
-      const json = decodeURIComponent(escape(atob(addBulk)));
+      // Support both base64-encoded JSON (bookmarklet) and plain URL-encoded JSON (iOS Shortcuts)
+      let json;
+      try { json = decodeURIComponent(escape(atob(addBulk))); } catch { json = decodeURIComponent(addBulk); }
       const payload = JSON.parse(json);
       const works = (payload.works || []).filter((w) => w.title && w.link);
       if (works.length > 0) {
@@ -1538,7 +1624,15 @@ function Tracker({ uid, userEmail, onSignOut }) {
 
   /* ---- fic CRUD ---- */
   const openAdd = () => setModal({ mode: "add", draft: emptyFic() });
-  const openEdit = (fic) => setModal({ mode: "edit", draft: { ...fic } });
+  const stampInteraction = useCallback((ficId) => {
+    persistFics((prev) => prev.map((f) => f.id === ficId ? { ...f, lastInteractedAt: nowISO() } : f));
+  }, []);
+
+  const openEdit = (fic) => {
+    // Stamp interaction when you open the edit modal — counts as engagement
+    persistFics((prev) => prev.map((f) => f.id === fic.id ? { ...f, lastInteractedAt: nowISO() } : f));
+    setModal({ mode: "edit", draft: { ...fic } });
+  };
   // Pre-build a Map for O(1) collection name lookups — resolves the (collection) id array
   // on each fic to the human-readable collection names shown on the card.
   const collectionById = useMemo(
@@ -1554,24 +1648,49 @@ function Tracker({ uid, userEmail, onSignOut }) {
   // Only AO3-sourced fields get overwritten (word count, chapters posted, summary, tags,
   // etc.) — everything you own personally (reading status/progress, notes, collections,
   // when you added it) is left exactly as it was.
-  const refreshFicWithFreshData = (existing, fresh) => ({
-    ...existing,
-    title: fresh.title || existing.title,
-    author: fresh.author || existing.author,
-    fandoms: fresh.fandoms?.length ? fresh.fandoms : existing.fandoms,
-    relationships: fresh.relationships?.length ? fresh.relationships : existing.relationships,
-    characters: fresh.characters?.length ? fresh.characters : existing.characters,
-    rating: fresh.rating || existing.rating,
-    warnings: fresh.warnings?.length ? fresh.warnings : existing.warnings,
-    wordCount: fresh.wordCount ?? existing.wordCount,
-    chapterCurrent: fresh.chapterCurrent ?? existing.chapterCurrent,
-    chapterTotal: fresh.chapterTotal ?? existing.chapterTotal,
-    ficStatus: fresh.ficStatus || existing.ficStatus,
-    dateFinished: fresh.dateFinished || existing.dateFinished,
-    lastUpdated: fresh.lastUpdated || existing.lastUpdated,
-    summary: fresh.summary || existing.summary,
-    tags: fresh.tags?.length ? fresh.tags : existing.tags,
-  });
+  const refreshFicWithFreshData = (existing, fresh) => {
+    const newChapterCurrent = fresh.chapterCurrent ?? existing.chapterCurrent;
+    const newFicStatus = fresh.ficStatus ?? existing.ficStatus;
+
+    // If new chapters have been posted since we last "caught up", automatically flip
+    // readingStatus back to Currently Reading — the user is no longer caught up and
+    // the badge/buttons should reflect that without requiring a manual status change.
+    const newReadingStatus = (
+      existing.readingStatus === "Completed" &&
+      newFicStatus !== "Complete" &&
+      newChapterCurrent > (existing.readChapter || 0)
+    ) ? "Currently Reading" : existing.readingStatus;
+
+    return {
+      ...existing,
+      title: fresh.title || existing.title,
+      author: fresh.author || existing.author,
+      fandoms: fresh.fandoms?.length ? fresh.fandoms : existing.fandoms,
+      relationships: fresh.relationships?.length ? fresh.relationships : existing.relationships,
+      characters: fresh.characters?.length ? fresh.characters : existing.characters,
+      rating: fresh.rating || existing.rating,
+      warnings: fresh.warnings?.length ? fresh.warnings : existing.warnings,
+      wordCount: fresh.wordCount ?? existing.wordCount,
+      chapterCurrent: newChapterCurrent,
+      chapterTotal: fresh.chapterTotal ?? existing.chapterTotal,
+      ficStatus: newFicStatus,
+      dateFinished: fresh.dateFinished ?? existing.dateFinished,
+      lastUpdated: fresh.lastUpdated ?? existing.lastUpdated,
+      summary: fresh.summary ?? existing.summary,
+      tags: fresh.tags?.length ? fresh.tags : existing.tags,
+      readingStatus: newReadingStatus,
+    };
+  };
+
+  // Called by the refresh button on each fic card — fetches fresh AO3 metadata for that
+  // specific fic and merges it in, preserving all personal data (reading status/progress,
+  // notes, collections). Throws on network/fetch failure so FicCard can show an error state.
+  const refreshFicFromAO3 = useCallback(async (fic) => {
+    const meta = await fetchMetadataFromLink(fic.link);
+    const refreshed = { ...refreshFicWithFreshData(fic, meta), lastInteractedAt: nowISO() };
+    persistFics((prev) => prev.map((f) => (f.id === fic.id ? refreshed : f)));
+    setToast({ kind: "ok", text: `Refreshed "${fic.title}" — updated stats from AO3.` });
+  }, []);
 
   const saveFromModal = () => {
     const d = modal.draft;
@@ -1579,9 +1698,18 @@ function Tracker({ uid, userEmail, onSignOut }) {
     const dup = findDuplicate(d, fics, modal.mode === "edit" ? d.id : null);
     if (dup) return; // blocked — warning banner in the modal already explains why
     if (modal.mode === "add") {
-      persistFicsAppend([d]);
+      const clean = { ...d, lastInteractedAt: nowISO(), seriesEntries: (d.seriesEntries || []).filter((e) => e.seriesName) };
+      persistFicsAppend([clean]);
     } else {
-      persistFics((prev) => prev.map((f) => (f.id === d.id ? d : f)));
+      // Stamp lastInteractedAt if the edit touched reading progress or status
+      const existing = fics.find((f) => f.id === d.id);
+      const interacted = existing && (
+        d.readingStatus !== existing.readingStatus ||
+        d.readChapter !== existing.readChapter
+      );
+      const cleanEntries = (d.seriesEntries || []).filter((e) => e.seriesName);
+      const toSave = { ...(interacted ? { ...d, lastInteractedAt: nowISO() } : d), seriesEntries: cleanEntries };
+      persistFics((prev) => prev.map((f) => (f.id === toSave.id ? toSave : f)));
     }
     setModal(null);
   };
@@ -1642,15 +1770,15 @@ function Tracker({ uid, userEmail, onSignOut }) {
     persistFics((prev) =>
       prev.map((f) => {
         if (f.id !== id) return f;
-        const patch = { readingStatus: status };
+        const patch = { readingStatus: status, lastInteractedAt: nowISO() };
         if (status === "Unread") {
           patch.readChapter = 0;
         }
         if (status === "Currently Reading" && (f.readCount || 0) > 0) {
-          patch.readChapter = 1; // Read again — restart from the top
+          patch.readChapter = 1;
         }
         if (status === "Completed") {
-          patch.readChapter = f.chapterCurrent || 0; // caught up on everything posted so far
+          patch.readChapter = f.chapterCurrent || 0;
           patch.readCount = (f.readCount || 0) + 1;
         }
         return { ...f, ...patch };
@@ -1658,14 +1786,12 @@ function Tracker({ uid, userEmail, onSignOut }) {
     );
   };
 
-  // Same patching rules as quickStatus, applied to many fics in a single write — used by
-  // every "mark read/unread" bulk-select action (Library, Recs, Series, Collections).
   const bulkMarkStatus = (ficIds, status) => {
     const idSet = new Set(ficIds);
     persistFics((prev) =>
       prev.map((f) => {
         if (!idSet.has(f.id)) return f;
-        const patch = { readingStatus: status };
+        const patch = { readingStatus: status, lastInteractedAt: nowISO() };
         if (status === "Unread") {
           patch.readChapter = 0;
         }
@@ -1826,7 +1952,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
         warnings: csvWarnings,
         wordCount: csvWordNum,
         chapterCurrent: csvChCurrent ?? 0,
-        chapterTotal: csvChTotal ?? 1,
+        chapterTotal: csvChTotal ?? 0,
         ficStatus,
         lastUpdated,
         summary: csvSummary,
@@ -1990,7 +2116,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
           warnings: meta.warnings || [],
           wordCount: meta.wordCount || 0,
           chapterCurrent: meta.chapterCurrent ?? 0,
-          chapterTotal: meta.chapterTotal || 1,
+          chapterTotal: meta.chapterTotal || 0,
           link: workUrl,
           source: "AO3",
           ficStatus: meta.ficStatus || "Complete",
@@ -2210,13 +2336,21 @@ function Tracker({ uid, userEmail, onSignOut }) {
     if (filterOneshotOnly) list = list.filter((f) => f.chapterTotal === 1);
     if (filterStandaloneOnly) list = list.filter((f) => !(f.seriesEntries && f.seriesEntries.length > 0));
 
+    const ao3Date = (f) => f.dateFinished || f.lastUpdated || f.dateStarted || f.dateAdded || "";
     const sorters = {
-      dateAdded_desc: (a, b) => (b.dateAdded || "").localeCompare(a.dateAdded || ""),
-      dateAdded_asc: (a, b) => (a.dateAdded || "").localeCompare(b.dateAdded || ""),
+      dateAdded_desc: (a, b) => ao3Date(b).localeCompare(ao3Date(a)),
+      dateAdded_asc: (a, b) => ao3Date(a).localeCompare(ao3Date(b)),
       title_asc: (a, b) => a.title.localeCompare(b.title),
       wordCount_desc: (a, b) => (b.wordCount || 0) - (a.wordCount || 0),
       wordCount_asc: (a, b) => (a.wordCount || 0) - (b.wordCount || 0),
       lastUpdated_asc: (a, b) => (a.lastUpdated || "9999").localeCompare(b.lastUpdated || "9999"),
+      // Most recently interacted = when YOU last changed reading status or progress.
+      // Falls back to dateAdded so newly-added fics still appear rather than sinking.
+      recentlyInteracted: (a, b) => {
+        const aDate = a.lastInteractedAt || a.dateAdded || "";
+        const bDate = b.lastInteractedAt || b.dateAdded || "";
+        return bDate.localeCompare(aDate);
+      },
     };
     return [...list].sort(sorters[sortBy] || sorters.dateAdded_desc);
   }, [fics, search, filterFandoms, filterShip, filterReading, filterFicStatus, filterRating, filterWordRange, filterOneshotOnly, filterStandaloneOnly, sortBy, authorFilterName]);
@@ -2284,9 +2418,9 @@ function Tracker({ uid, userEmail, onSignOut }) {
   // extra request to AO3 at all, so there's nothing for their anti-bot protection to flag)
   // and only falls back to the old server-fetch approach if the page doesn't look like a
   // normal, parseable work page.
-  const addBookmarkletHref = `javascript:(function () { var m = location.pathname.match(/\\/works\\/(\\d+)/); if (!m) { alert('Open this on an AO3 work page first.'); return; } var workId = m[1]; var canonicalUrl = 'https://archiveofourown.org/works/' + workId; var ORIGIN='${typeof window !== "undefined" ? window.location.origin : ""}'; function openViaServerFetch() { window.open(ORIGIN + '/?add=' + encodeURIComponent(canonicalUrl), '_blank'); } try { var RATING_MAP = { 'Not Rated': 'NR', 'General Audiences': 'G', 'Teen And Up Audiences': 'T', 'Mature': 'M', 'Explicit': 'E' }; var MONTHS = { Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12' }; function txt(el) { return el ? el.textContent.trim() : ''; } function tagList(scope, cls) { return Array.from(scope.querySelectorAll('dd.' + cls + ' a.tag, dd.' + cls + ' li a.tag, dd.' + cls + ' li.' + cls + ' a.tag')) .map(function (a) { return a.textContent.trim(); }); } function parseAo3Date(str) { if (!str) return null; var mm = str.match(/(\\d+)\\s+(\\w+)\\s+(\\d{4})/); if (!mm) return null; var mon = MONTHS[mm[2]] || '01'; return mm[3] + '-' + mon + '-' + ('0' + mm[1]).slice(-2); } function ddAfterDt(label) { var dts = document.querySelectorAll('dl.work.meta.group dt'); for (var i = 0; i < dts.length; i++) { if (dts[i].textContent.trim().indexOf(label) === 0) { var dd = dts[i].nextElementSibling; if (dd && dd.tagName === 'DD') return dd; } } return null; } var titleEl = document.querySelector('h2.title.heading'); var title = titleEl ? titleEl.textContent.trim() : ''; var authorEl = document.querySelector('a[rel="author"]'); var author = authorEl ? authorEl.textContent.trim() : ''; if (!title || !author) { openViaServerFetch(); return; } var summaryEl = document.querySelector('div.summary.module blockquote.userstuff'); var summary = summaryEl ? summaryEl.textContent.trim().slice(0, 800) : ''; var ratingDd = ddAfterDt('Rating'); var ratingTag = ratingDd ? ratingDd.querySelector('a.tag') : null; var rating = ratingTag ? (RATING_MAP[ratingTag.textContent.trim()] || null) : null; var warningsDd = ddAfterDt('Archive Warning'); var warnings = warningsDd ? Array.from(warningsDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var fandomDd = ddAfterDt('Fandom'); var fandoms = fandomDd ? Array.from(fandomDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var relDd = ddAfterDt('Relationship'); var relationships = relDd ? Array.from(relDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var charDd = ddAfterDt('Character'); var characters = charDd ? Array.from(charDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var freeDd = ddAfterDt('Additional Tags'); var tags = freeDd ? Array.from(freeDd.querySelectorAll('a.tag')).map(function (a) { return a.textContent.trim(); }) : []; var wordsDd = document.querySelector('dl.stats dd.words'); var wordCount = wordsDd ? parseInt(wordsDd.textContent.replace(/[^\\d]/g, '')) || 0 : 0; var chaptersDd = document.querySelector('dl.stats dd.chapters'); var chapText = chaptersDd ? chaptersDd.textContent.trim() : ''; var chapM = chapText.match(/(\\d+)\\/(\\d+|\\?)/); var chapterCurrent = chapM ? parseInt(chapM[1]) : null; var chapterTotal = chapM ? (chapM[2] === '?' ? null : parseInt(chapM[2])) : null; var ficStatus = (chapterTotal && chapterCurrent === chapterTotal) ? 'Complete' : (chapterTotal ? 'WIP' : null); var publishedDd = ddAfterDt('Published'); var completedDd = ddAfterDt('Completed'); var updatedDd = ddAfterDt('Updated'); var published = publishedDd ? parseAo3Date(txt(publishedDd)) : null; var completed = completedDd ? parseAo3Date(txt(completedDd)) : null; var updatedRaw = updatedDd ? parseAo3Date(txt(updatedDd)) : null; var dateStarted = published, dateFinished = null, lastUpdated = null; if (chapterTotal === 1) { dateFinished = published; } else if (ficStatus === 'Complete') { dateFinished = completed || published; } else { lastUpdated = updatedRaw || published; } var seriesDd = ddAfterDt('Series'); var seriesList = []; if (seriesDd) { var posSpans = seriesDd.querySelectorAll('span.position'); for (var psi = 0; psi < posSpans.length; psi++) { var ps = posSpans[psi]; var pm2 = ps.textContent.match(/Part\\s*(\\d+)\\s*of/); var sl2 = ps.querySelector('a'); if (sl2) { var href2 = sl2.getAttribute('href') || ''; var link2 = href2.indexOf('http') === 0 ? href2 : 'https://archiveofourown.org' + href2; seriesList.push({ name: sl2.textContent.trim(), position: pm2 ? parseInt(pm2[1]) : null, link: link2 }); } } } var seriesName = seriesList.length > 0 ? seriesList[0].name : null; var seriesPosition = seriesList.length > 0 ? seriesList[0].position : null; var data = { link: canonicalUrl, title: title, author: author, fandoms: fandoms, relationships: relationships, characters: characters, rating: rating, warnings: warnings, wordCount: wordCount, chapterCurrent: chapterCurrent, chapterTotal: chapterTotal, ficStatus: ficStatus, dateStarted: dateStarted, dateFinished: dateFinished, lastUpdated: lastUpdated, summary: summary, tags: tags, seriesName: seriesName, seriesPosition: seriesPosition, seriesList: seriesList }; var json = JSON.stringify(data); var encoded = encodeURIComponent(btoa(unescape(encodeURIComponent(json)))); window.open(ORIGIN + '/?addData=' + encoded, '_blank'); } catch (e) { openViaServerFetch(); } })();`;
+  const addBookmarkletHref = `javascript:(function(){var m=location.pathname.match(/\/works\/(\\d+)/);if(!m){alert('Open this on an AO3 work page first.');return;}var workId=m[1];var canonicalUrl='https://archiveofourown.org/works/'+workId;var ORIGIN='${typeof window !== "undefined" ? window.location.origin : ""}';function openViaServerFetch(){window.open(ORIGIN+'/?add='+encodeURIComponent(canonicalUrl),'_blank');}try{var RATING_MAP={'Not Rated':'NR','General Audiences':'G','Teen And Up Audiences':'T','Mature':'M','Explicit':'E'};var MONTHS={Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};function txt(el){return el?el.textContent.trim():'';}function tagList(scope,cls){return Array.from(scope.querySelectorAll('dd.'+cls+' a.tag, dd.'+cls+' li a.tag, dd.'+cls+' li.'+cls+' a.tag')).map(function(a){return a.textContent.trim();});}function parseAo3Date(str){if(!str)return null;var mm=str.match(/(\\d+)\\s+(\\w+)\\s+(\\d{4})/);if(!mm)return null;var mon=MONTHS[mm[2]]||'01';return mm[3]+'-'+mon+'-'+('0'+mm[1]).slice(-2);}function ddAfterDt(label){var dts=document.querySelectorAll('dl.work.meta.group dt');for(var i=0;i<dts.length;i++){if(dts[i].textContent.trim().indexOf(label)===0){var dd=dts[i].nextElementSibling;if(dd&&dd.tagName==='DD')return dd;}}return null;}var titleEl=document.querySelector('h2.title.heading');var title=titleEl?titleEl.textContent.trim():'';var authorEl=document.querySelector('a[rel="author"]');var author=authorEl?authorEl.textContent.trim():'';if(!title||!author){openViaServerFetch();return;}var summaryEl=document.querySelector('div.summary.module blockquote.userstuff');var summary=summaryEl?summaryEl.textContent.trim().slice(0,800):'';var ratingDd=ddAfterDt('Rating');var ratingTag=ratingDd?ratingDd.querySelector('a.tag'):null;var rating=ratingTag?(RATING_MAP[ratingTag.textContent.trim()]||null):null;var warningsDd=ddAfterDt('Archive Warning');var warnings=warningsDd?Array.from(warningsDd.querySelectorAll('a.tag')).map(function(a){return a.textContent.trim();}):[];var fandomDd=ddAfterDt('Fandom');var fandoms=fandomDd?Array.from(fandomDd.querySelectorAll('a.tag')).map(function(a){return a.textContent.trim();}):[];var relDd=ddAfterDt('Relationship');var relationships=relDd?Array.from(relDd.querySelectorAll('a.tag')).map(function(a){return a.textContent.trim();}):[];var charDd=ddAfterDt('Character');var characters=charDd?Array.from(charDd.querySelectorAll('a.tag')).map(function(a){return a.textContent.trim();}):[];var freeDd=ddAfterDt('Additional Tags');var tags=freeDd?Array.from(freeDd.querySelectorAll('a.tag')).map(function(a){return a.textContent.trim();}):[];var wordsDd=document.querySelector('dl.stats dd.words');var wordCount=wordsDd?parseInt(wordsDd.textContent.replace(/[^\\d]/g,''))||0:0;var chaptersDd=document.querySelector('dl.stats dd.chapters');var chapText=chaptersDd?chaptersDd.textContent.trim():'';var chapM=chapText.match(/(\\d+)\\/(\\d+|\\?)/);var chapterCurrent=chapM?parseInt(chapM[1]):null;var chapterTotal=chapM?(chapM[2]==='?'?null:parseInt(chapM[2])):null;var ficStatus=(chapterTotal&&chapterCurrent===chapterTotal)?'Complete':(chapterTotal?'WIP':null);var publishedDd=ddAfterDt('Published');var completedDd=ddAfterDt('Completed');var updatedDd=ddAfterDt('Updated');var published=publishedDd?parseAo3Date(txt(publishedDd)):null;var completed=completedDd?parseAo3Date(txt(completedDd)):null;var updatedRaw=updatedDd?parseAo3Date(txt(updatedDd)):null;var dateStarted=published,dateFinished=null,lastUpdated=null;if(chapterTotal===1){dateFinished=published;}else if(ficStatus==='Complete'){dateFinished=completed||published;}else{lastUpdated=updatedRaw||published;}var seriesDd=ddAfterDt('Series');var seriesList=[];if(seriesDd){var posSpans=seriesDd.querySelectorAll('span.position');for(var psi=0;psi<posSpans.length;psi++){var ps=posSpans[psi];var pm2=ps.textContent.match(/Part\\s*(\\d+)\\s*of/);var sl2=ps.querySelector('a');if(sl2){var href2=sl2.getAttribute('href')||'';var link2=href2.indexOf('http')===0?href2:'https://archiveofourown.org'+href2;seriesList.push({name:sl2.textContent.trim(),position:pm2?parseInt(pm2[1]):null,link:link2});}}}var seriesName=seriesList.length>0?seriesList[0].name:null;var seriesPosition=seriesList.length>0?seriesList[0].position:null;var data={link:canonicalUrl,title:title,author:author,fandoms:fandoms,relationships:relationships,characters:characters,rating:rating,warnings:warnings,wordCount:wordCount,chapterCurrent:chapterCurrent,chapterTotal:chapterTotal,ficStatus:ficStatus,dateStarted:dateStarted,dateFinished:dateFinished,lastUpdated:lastUpdated,summary:summary,tags:tags,seriesName:seriesName,seriesPosition:seriesPosition,seriesList:seriesList};var json=JSON.stringify(data);var encoded=encodeURIComponent(btoa(unescape(encodeURIComponent(json))));window.open(ORIGIN+'/?addData='+encoded,'_blank');}catch(e){openViaServerFetch();}})();`;
 
-  const addBulkBookmarkletHref = `javascript:(function(){var ORIGIN='${typeof window !== "undefined" ? window.location.origin : ""}';var RATING_MAP={'Not Rated':'NR','General Audiences':'G','Teen And Up Audiences':'T','Mature':'M','Explicit':'E'};var MONTHS={Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};function txt(el){return el?el.textContent.trim():'';}function tagList(li,cls){return Array.from(li.querySelectorAll('ul.tags.commas li.'+cls+' a.tag')).map(function(a){return a.textContent.trim();});}function parseDate(s){var m=s.match(/(\\d+)\\s+(\\w+)\\s+(\\d{4})/);if(!m)return null;var mn=MONTHS[m[2]]||'01';return m[3]+'-'+mn+'-'+('0'+m[1]).slice(-2);}var isSeriesPage=/^\\/series\\/\\d+/.test(location.pathname);var seriesPageTitle='';var seriesPageLink='';if(isSeriesPage){var sTitleEl=document.querySelector('h2.heading');seriesPageTitle=sTitleEl?sTitleEl.textContent.trim():'';var sIdMatch=location.pathname.match(/\\/series\\/(\\d+)/);seriesPageLink=sIdMatch?'https://archiveofourown.org/series/'+sIdMatch[1]:'';}var seriesPageCompleted=null;var seriesPageDescription='';if(isSeriesPage){var allDts=document.querySelectorAll('dt');for(var di=0;di<allDts.length;di++){var dtTxt=allDts[di].textContent.trim();if(dtTxt==='Complete:'){var cdd=allDts[di].nextElementSibling;if(cdd&&cdd.tagName==='DD'){var ctxt=cdd.textContent.trim();seriesPageCompleted=ctxt==='Yes'?true:(ctxt==='No'?false:null);}}else if(dtTxt==='Description:'){var ddd=allDts[di].nextElementSibling;if(ddd&&ddd.tagName==='DD'){var bq=ddd.querySelector('blockquote');seriesPageDescription=(bq||ddd).textContent.trim();}}}}var pageParam=location.search.match(/[?&]page=(\d+)/);var seriesPageIdx=pageParam?(parseInt(pageParam[1])-1)*20:0;var entries=document.querySelectorAll('li.work.blurb.group,li.bookmark.blurb.group');if(!entries.length){alert('No works found. Use on a series, collection, or search results page.');return;}var works=[];entries.forEach(function(li){var workId=null;var im=li.id.match(/work_(\\d+)/);if(im)workId=im[1];else{var cm=li.className.match(/work-(\\d+)/);if(cm)workId=cm[1];}if(!workId)return;var titleEl=li.querySelector('h4.heading a:not([rel="author"])');var title=titleEl?titleEl.textContent.trim():'';if(!title)return;var authorEl=li.querySelector('h4.heading a[rel="author"]');var ratingSpan=li.querySelector('ul.required-tags span[class*="rating-"]');var ratingTxt=ratingSpan?ratingSpan.getAttribute('title'):'';var rating=RATING_MAP[ratingTxt]||null;var statusSpan=li.querySelector('ul.required-tags span[class*="complete-"]');var ficStatus=statusSpan?(statusSpan.getAttribute('title')==='Complete Work'?'Complete':'WIP'):null;var wordsEl=li.querySelector('dd.words');var wordCount=wordsEl?parseInt(wordsEl.textContent.replace(/,/g,''))||0:0;var chapEl=li.querySelector('dd.chapters');var chapM=(chapEl?chapEl.textContent.trim():'').match(/(\\d+)\\/(\\d+|\\?)/);var chapterCurrent=chapM?parseInt(chapM[1]):null;var chapterTotal=chapM?(chapM[2]==='?'?null:parseInt(chapM[2])):null;if(!ficStatus&&chapterTotal)ficStatus=chapterCurrent===chapterTotal?'Complete':'WIP';var dateEl=li.querySelector('p.datetime');var dateStr=parseDate(txt(dateEl));var summaryEl=li.querySelector('blockquote.userstuff.summary');var summary=summaryEl?summaryEl.textContent.trim().slice(0,250):'';var seriesName=null,seriesPosition=null,seriesLink=null;if(isSeriesPage){seriesName=seriesPageTitle||null;seriesPageIdx++;seriesPosition=seriesPageIdx;seriesLink=seriesPageLink||null;}else{var seriesLi=li.querySelector('ul.series li');if(seriesLi){var pm=seriesLi.textContent.match(/Part\\\\s+(\\\\d+)\\\\s+of/);var sl=seriesLi.querySelector('a');seriesPosition=pm?parseInt(pm[1]):null;seriesName=sl?sl.textContent.trim():null;if(sl){var href3=sl.getAttribute('href')||'';seriesLink=href3.indexOf('http')===0?href3:'https://archiveofourown.org'+href3;}}}works.push({link:'https://archiveofourown.org/works/'+workId,title:title,author:txt(authorEl),fandoms:Array.from(li.querySelectorAll('h5.fandoms.heading a.tag')).map(function(a){return a.textContent.trim();}),relationships:tagList(li,'relationships'),characters:tagList(li,'characters'),rating:rating,warnings:tagList(li,'warnings'),wordCount:wordCount,chapterCurrent:chapterCurrent,chapterTotal:chapterTotal,ficStatus:ficStatus,dateStarted:dateStr,dateFinished:ficStatus==='Complete'?dateStr:null,lastUpdated:ficStatus!=='Complete'?dateStr:null,summary:summary,tags:tagList(li,'freeforms'),seriesName:seriesName,seriesPosition:seriesPosition,seriesLink:seriesLink});});if(!works.length){alert('Could not extract works from this page.');return;}var pageTitleEl=document.querySelector('h2.heading');var payload={works:works,sourceTitle:pageTitleEl?pageTitleEl.textContent.trim():'',sourcePage:location.href,sourceCompleted:seriesPageCompleted,sourceDescription:seriesPageDescription};var json=JSON.stringify(payload);var encoded=encodeURIComponent(btoa(unescape(encodeURIComponent(json))));if(encoded.length>60000){works.forEach(function(w){w.summary='';});json=JSON.stringify({works:works,sourceTitle:payload.sourceTitle,sourcePage:payload.sourcePage});encoded=encodeURIComponent(btoa(unescape(encodeURIComponent(json))));}window.open(ORIGIN+'/?addBulk='+encoded,'_blank');})()`;
+  const addBulkBookmarkletHref = `javascript:(function(){var ORIGIN='${typeof window !== "undefined" ? window.location.origin : ""}';var RATING_MAP={'Not Rated':'NR','General Audiences':'G','Teen And Up Audiences':'T','Mature':'M','Explicit':'E'};var MONTHS={Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};function txt(el){return el?el.textContent.trim():'';}function tagList(li,cls){return Array.from(li.querySelectorAll('ul.tags.commas li.'+cls+' a.tag')).map(function(a){return a.textContent.trim();});}function parseDate(s){var m=s.match(/(\\d+)\\s+(\\w+)\\s+(\\d{4})/);if(!m)return null;var mn=MONTHS[m[2]]||'01';return m[3]+'-'+mn+'-'+('0'+m[1]).slice(-2);}var isSeriesPage=/^\\/series\\/\\d+/.test(location.pathname);var seriesPageTitle='';var seriesPageLink='';if(isSeriesPage){var sTitleEl=document.querySelector('h2.heading');seriesPageTitle=sTitleEl?sTitleEl.textContent.trim():'';var sIdMatch=location.pathname.match(/\\/series\\/(\\d+)/);seriesPageLink=sIdMatch?'https://archiveofourown.org/series/'+sIdMatch[1]:'';}var seriesPageCompleted=null;var seriesPageDescription='';if(isSeriesPage){var allDts=document.querySelectorAll('dt');for(var di=0;di<allDts.length;di++){var dtTxt=allDts[di].textContent.trim();if(dtTxt==='Complete:'){var cdd=allDts[di].nextElementSibling;if(cdd&&cdd.tagName==='DD'){var ctxt=cdd.textContent.trim();seriesPageCompleted=ctxt==='Yes'?true:(ctxt==='No'?false:null);}}else if(dtTxt==='Description:'){var ddd=allDts[di].nextElementSibling;if(ddd&&ddd.tagName==='DD'){var bq=ddd.querySelector('blockquote');seriesPageDescription=(bq||ddd).textContent.trim();}}}}var pageParam=location.search.match(/[?&]page=(\\d+)/);var seriesPageIdx=pageParam?(parseInt(pageParam[1])-1)*20:0;var entries=document.querySelectorAll('li.work.blurb.group,li.bookmark.blurb.group');if(!entries.length){alert('No works found. Use on a series, collection, or search results page.');return;}var works=[];entries.forEach(function(li){var workId=null;var im=li.id.match(/work_(\\d+)/);if(im)workId=im[1];else{var cm=li.className.match(/work-(\\d+)/);if(cm)workId=cm[1];}if(!workId)return;var titleEl=li.querySelector('h4.heading a:not([rel="author"])');var title=titleEl?titleEl.textContent.trim():'';if(!title)return;var authorEl=li.querySelector('h4.heading a[rel="author"]');var ratingSpan=li.querySelector('ul.required-tags span[class*="rating-"]');var ratingTxt=ratingSpan?ratingSpan.getAttribute('title'):'';var rating=RATING_MAP[ratingTxt]||null;var statusSpan=li.querySelector('ul.required-tags span[class*="complete-"]');var ficStatus=statusSpan?(statusSpan.getAttribute('title')==='Complete Work'?'Complete':'WIP'):null;var wordsEl=li.querySelector('dd.words');var wordCount=wordsEl?parseInt(wordsEl.textContent.replace(/,/g,''))||0:0;var chapEl=li.querySelector('dd.chapters');var chapM=(chapEl?chapEl.textContent.trim():'').match(/(\\d+)\\/(\\d+|\\?)/);var chapterCurrent=chapM?parseInt(chapM[1]):null;var chapterTotal=chapM?(chapM[2]==='?'?null:parseInt(chapM[2])):null;if(!ficStatus&&chapterTotal)ficStatus=chapterCurrent===chapterTotal?'Complete':'WIP';var dateEl=li.querySelector('p.datetime');var dateStr=parseDate(txt(dateEl));var summaryEl=li.querySelector('blockquote.userstuff.summary');var summary=summaryEl?summaryEl.textContent.trim().slice(0,250):'';var seriesList2=[];if(isSeriesPage){var seriesDomLi=li.querySelector('ul.series li');var seriesPosEl=seriesDomLi?seriesDomLi.querySelector('strong,b'):null;var seriesPos=seriesPosEl&&parseInt(seriesPosEl.textContent)>0?parseInt(seriesPosEl.textContent):(++seriesPageIdx);seriesList2=[{name:seriesPageTitle||'',position:seriesPos,link:seriesPageLink||''}];}else{var posSpans2=li.querySelectorAll('ul.series li');for(var si2=0;si2<posSpans2.length;si2++){var ps2=posSpans2[si2];var pm2El=ps2.querySelector('strong,b');var pm2=pm2El?[null,pm2El.textContent]:null;;var sl2=ps2.querySelector('a');if(sl2){var href4=sl2.getAttribute('href')||'';var link4=href4.indexOf('http')===0?href4:'https://archiveofourown.org'+href4;seriesList2.push({name:sl2.textContent.trim(),position:pm2?parseInt(pm2[1]):null,link:link4});}}};var seriesName=seriesList2.length>0?seriesList2[0].name:null;var seriesPosition=seriesList2.length>0?seriesList2[0].position:null;var seriesLink=seriesList2.length>0?seriesList2[0].link:null;works.push({link:'https://archiveofourown.org/works/'+workId,title:title,author:txt(authorEl),fandoms:Array.from(li.querySelectorAll('h5.fandoms.heading a.tag')).map(function(a){return a.textContent.trim();}),relationships:tagList(li,'relationships'),characters:tagList(li,'characters'),rating:rating,warnings:tagList(li,'warnings'),wordCount:wordCount,chapterCurrent:chapterCurrent,chapterTotal:chapterTotal,ficStatus:ficStatus,dateStarted:dateStr,dateFinished:ficStatus==='Complete'?dateStr:null,lastUpdated:ficStatus!=='Complete'?dateStr:null,summary:summary,tags:tagList(li,'freeforms'),seriesName:seriesName,seriesPosition:seriesPosition,seriesLink:seriesLink,seriesList:seriesList2});});if(!works.length){alert('Could not extract works from this page.');return;}var pageTitleEl=document.querySelector('h2.heading');var payload={works:works,sourceTitle:pageTitleEl?pageTitleEl.textContent.trim():'',sourcePage:location.href,sourceCompleted:seriesPageCompleted,sourceDescription:seriesPageDescription};var json=JSON.stringify(payload);var encoded=encodeURIComponent(btoa(unescape(encodeURIComponent(json))));if(encoded.length>60000){works.forEach(function(w){w.summary='';});json=JSON.stringify({works:works,sourceTitle:payload.sourceTitle,sourcePage:payload.sourcePage});encoded=encodeURIComponent(btoa(unescape(encodeURIComponent(json))));}window.open(ORIGIN+'/?addBulk='+encoded,'_blank');})()`;
 
   /* ---------------------------------------------------------------- */
 
@@ -2327,8 +2461,8 @@ function Tracker({ uid, userEmail, onSignOut }) {
         </div>
       )}
 
+      <div className="ft-nav-safe-top" />
       <nav className="ft-nav">
-        <div className="ft-brand"><BookOpen size={18} /> Fic Tracker</div>
         <div className="ft-nav-items">
           {NAV_ITEMS.map((n) => (
             <button
@@ -2340,15 +2474,17 @@ function Tracker({ uid, userEmail, onSignOut }) {
             </button>
           ))}
         </div>
-        {trash.length > 0 && (
-          <button className="ft-iconbtn ft-nav-settings" style={{ marginLeft: "auto", position: "relative" }} onClick={() => setTrashOpen(true)} title={`Trash (${trash.length})`}>
-            <Trash2 size={16} />
-            <span className="ft-trash-badge">{trash.length}</span>
+        <div className="ft-nav-end">
+          {trash.length > 0 && (
+            <button className="ft-iconbtn ft-nav-settings" style={{ position: "relative" }} onClick={() => setTrashOpen(true)} title={`Trash (${trash.length})`}>
+              <Trash2 size={16} />
+              <span className="ft-trash-badge">{trash.length}</span>
+            </button>
+          )}
+          <button className="ft-iconbtn ft-nav-settings" onClick={() => setSettingsOpen(true)} title="Settings">
+            <Settings size={16} />
           </button>
-        )}
-        <button className="ft-iconbtn ft-nav-settings" onClick={() => setSettingsOpen(true)} title="Settings">
-          <Settings size={16} />
-        </button>
+        </div>
       </nav>
 
       <main className="ft-main">
@@ -2453,8 +2589,9 @@ function Tracker({ uid, userEmail, onSignOut }) {
                   Standalone only
                 </label>
                 <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
-                  <option value="dateAdded_desc">Newest added</option>
-                  <option value="dateAdded_asc">Oldest added</option>
+                  <option value="dateAdded_desc">Most recently active on AO3</option>
+                  <option value="dateAdded_asc">Least recently active on AO3</option>
+                  <option value="recentlyInteracted">Recently interacted</option>
                   <option value="title_asc">Title A–Z</option>
                   <option value="wordCount_desc">Longest first</option>
                   <option value="wordCount_asc">Shortest first</option>
@@ -2505,6 +2642,9 @@ function Tracker({ uid, userEmail, onSignOut }) {
                       onQuickStatus={quickStatus}
                       confirmingDelete={confirmDeleteId === f.id}
                       collectionNames={ficCollectionNames(f)}
+                      onRefresh={refreshFicFromAO3}
+                      onLinkClick={stampInteraction}
+                      onRefreshError={(msg) => setToast({ kind: "warn", text: msg })}
                     />
                   </div>
                 ))
@@ -2574,6 +2714,9 @@ function Tracker({ uid, userEmail, onSignOut }) {
                       }}
                       onBulkMarkStatus={bulkMarkStatus}
                       ficCollectionNames={ficCollectionNames}
+                      onRefreshFic={refreshFicFromAO3}
+                      stampInteraction={stampInteraction}
+                      onRefreshError={(msg) => setToast({ kind: "warn", text: msg })}
                       onEditFic={openEdit}
                       onDeleteFic={deleteFic}
                       onQuickStatus={quickStatus}
@@ -2636,6 +2779,9 @@ function Tracker({ uid, userEmail, onSignOut }) {
                     }}
                     onBulkMarkStatus={bulkMarkStatus}
                     ficCollectionNames={ficCollectionNames}
+                    onRefreshFic={refreshFicFromAO3}
+                    stampInteraction={stampInteraction}
+                    onRefreshError={(msg) => setToast({ kind: "warn", text: msg })}
                     allCollections={lists.collections}
                     onEditFic={openEdit}
                     onDeleteFic={deleteFic}
@@ -2707,7 +2853,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
                 <h3>WIPs to check on</h3>
                 <p className="ft-muted">Sorted by least recently updated.</p>
                 <div className="ft-grid">
-                  {staleWips.slice(0, 6).map((f) => <FicCard key={f.id} fic={f} onEdit={openEdit} onDelete={deleteFic} onQuickStatus={quickStatus} confirmingDelete={confirmDeleteId === f.id} collectionNames={ficCollectionNames(f)} />)}
+                  {staleWips.slice(0, 6).map((f) => <FicCard key={f.id} fic={f} onEdit={openEdit} onDelete={deleteFic} onQuickStatus={quickStatus} confirmingDelete={confirmDeleteId === f.id} collectionNames={ficCollectionNames(f)} onRefresh={refreshFicFromAO3} onLinkClick={stampInteraction} onRefreshError={(msg) => setToast({ kind: "warn", text: msg })} />)}
                 </div>
               </div>
             )}
@@ -2885,7 +3031,7 @@ function Tracker({ uid, userEmail, onSignOut }) {
                       if (r.refreshExisting && r.toRefresh.length > 0) {
                         const refreshMap = new Map(r.toRefresh.map((pair) => [pair.existing.id, pair.fresh]));
                         persistFics((prev) =>
-                          prev.map((f) => (refreshMap.has(f.id) ? refreshFicWithFreshData(f, refreshMap.get(f.id)) : f))
+                          prev.map((f) => (refreshMap.has(f.id) ? { ...refreshFicWithFreshData(f, refreshMap.get(f.id)), lastInteractedAt: nowISO() } : f))
                         );
                       }
                     }
@@ -2933,13 +3079,27 @@ function Tracker({ uid, userEmail, onSignOut }) {
           }}
           onAdd={(drafts, seriesLinks, skippedDupCount, refreshes) => {
             if (drafts.length > 0) {
-              const newFics = drafts.map((d) => ({ ...emptyFic(), ...d, id: genId(), dateAdded: today() }));
+              const newFics = drafts.map((d) => ({ ...emptyFic(), ...d, id: genId(), dateAdded: today(), lastInteractedAt: nowISO() }));
               persistFicsAppend(newFics);
             }
             if (refreshes && refreshes.length > 0) {
               const refreshMap = new Map(refreshes.map((r) => [r.existing.id, r.fresh]));
               persistFics((prev) =>
-                prev.map((f) => (refreshMap.has(f.id) ? refreshFicWithFreshData(f, refreshMap.get(f.id)) : f))
+                prev.map((f) => {
+                  if (!refreshMap.has(f.id)) return f;
+                  const fresh = refreshMap.get(f.id);
+                  const base = refreshFicWithFreshData(f, fresh);
+                  // Merge any new series from the incoming data
+                  const incomingSeries = (fresh.seriesList && fresh.seriesList.length > 0)
+                    ? fresh.seriesList.map((s) => ({ seriesName: s.name, seriesPosition: s.position ?? "" })).filter((s) => s.seriesName)
+                    : fresh.seriesName ? [{ seriesName: fresh.seriesName, seriesPosition: fresh.seriesPosition ?? "" }] : [];
+                  const existingSeries = base.seriesEntries || [];
+                  const merged = [...existingSeries];
+                  incomingSeries.forEach((s) => {
+                    if (!merged.some((e) => e.seriesName === s.seriesName)) merged.push(s);
+                  });
+                  return { ...base, seriesEntries: merged, lastInteractedAt: nowISO() };
+                })
               );
             }
             // Create/patch a lists.series entry (with the AO3 link already filled in, and the
@@ -2982,10 +3142,27 @@ function Tracker({ uid, userEmail, onSignOut }) {
                   className="ft-pill"
                   style={{ marginLeft: 6 }}
                   onClick={() => {
-                    const refreshed = refreshFicWithFreshData(dup, modal.draft);
+                    const base = refreshFicWithFreshData(dup, modal.draft);
+                    // Merge any new series from the incoming bookmarklet data into the
+                    // existing fic's seriesEntries — so adding a fic that's already in the
+                    // library from a different series page updates it with the new series too
+                    const incomingSeries = modal.draft.seriesEntries || [];
+                    const existingSeries = base.seriesEntries || [];
+                    const merged = [...existingSeries];
+                    incomingSeries.forEach((incoming) => {
+                      if (!incoming.seriesName) return;
+                      const alreadyHas = merged.some((e) => e.seriesName === incoming.seriesName);
+                      if (!alreadyHas) merged.push(incoming);
+                    });
+                    const refreshed = { ...base, seriesEntries: merged, lastInteractedAt: nowISO() };
                     persistFics((prev) => prev.map((f) => (f.id === dup.id ? refreshed : f)));
+                    // Also patch the series list so the new series gets a link entry
+                    incomingSeries.forEach((s) => { if (s.seriesName) createOrPatchSeries(s.seriesName, {}); });
                     setModal(null);
-                    setToast({ kind: "ok", text: `Refreshed "${dup.title}" with the latest from AO3 — word count, chapters, etc.` });
+                    const newSeriesNames = incomingSeries.filter((s) => s.seriesName && !existingSeries.some((e) => e.seriesName === s.seriesName)).map((s) => s.seriesName);
+                    setToast({ kind: "ok", text: newSeriesNames.length
+                      ? `Updated "${dup.title}" — added to ${newSeriesNames.join(", ")}.`
+                      : `Refreshed "${dup.title}" with the latest from AO3 — word count, chapters, etc.` });
                   }}
                 >
                   <RotateCcw size={12} /> Refresh its stats
@@ -3506,29 +3683,25 @@ const CSS = `
 .ft-spin { animation: ft-spin 1s linear infinite; }
 @keyframes ft-spin { to { transform: rotate(360deg); } }
 
+.ft-nav-safe-top { height: env(safe-area-inset-top); background: var(--c-accent); width: 100%; flex-shrink: 0; }
 .ft-nav {
-  width: 100%;
-  flex-shrink: 0;
-  background: var(--c-accent);
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  padding: 0 16px;
-  height: 52px;
-  gap: 2px;
-  overflow-x: auto;
+  width: 100%; flex-shrink: 0; background: var(--c-accent);
+  display: flex; flex-direction: row; align-items: center; flex-wrap: nowrap;
+  padding: 0 4px; height: 44px; gap: 0; overflow: hidden;
 }
-.ft-brand { font-weight: 800; font-size: 16px; display: flex; align-items: center; gap: 8px; padding: 0; color: #fff; margin-right: 18px; flex-shrink: 0; }
-.ft-nav-items { display: flex; flex-direction: row; gap: 0; height: 100%; }
+.ft-brand { font-weight: 800; font-size: 16px; display: flex; align-items: center; gap: 8px; padding: 0; color: #fff; margin-right: 18px; flex-shrink: 0; height: 44px; }
+.ft-nav-items { display: flex; flex-direction: row; gap: 0; height: 44px; flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.ft-nav-items::-webkit-scrollbar { display: none; }
+.ft-nav-end { display: flex; flex-direction: row; align-items: center; height: 44px; flex-shrink: 0; gap: 0; }
 .ft-nav-item {
   display: flex; align-items: center; gap: 7px;
-  padding: 0 12px; border-radius: 0; border: none; background: transparent;
+  padding: 0 10px; border-radius: 0; border: none; background: transparent;
   color: rgba(255,255,255,0.75); font-size: 13px; cursor: pointer; text-align: left;
-  height: 100%; border-bottom: 3px solid transparent; white-space: nowrap;
+  height: 44px; border-bottom: 3px solid transparent; white-space: nowrap; flex-shrink: 0;
 }
 .ft-nav-item:hover { background: rgba(255,255,255,0.08); color: #fff; }
 .ft-nav-item-active { background: transparent; color: #fff; border-bottom-color: #fff; }
-.ft-nav-settings { margin-left: auto; flex-shrink: 0; color: rgba(255,255,255,0.85) !important; }
+.ft-nav-settings { flex-shrink: 0; color: rgba(255,255,255,0.85) !important; height: 44px; width: 40px; }
 .ft-nav-settings:hover { background: rgba(255,255,255,0.12) !important; color: #fff !important; }
 .ft-trash-badge {
   position: absolute; top: -2px; right: -2px; background: var(--c-rose); color: #fff;
@@ -3536,7 +3709,7 @@ const CSS = `
   min-width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; padding: 0 3px;
 }
 
-.ft-main { flex: 1; padding: 20px 24px 40px; overflow-y: auto; min-width: 0; }
+.ft-main { flex: 1; padding: 20px 24px calc(40px + env(safe-area-inset-bottom)); overflow-y: auto; min-width: 0; }
 
 .ft-topbar { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 .ft-search { flex: 1; min-width: 180px; display: flex; align-items: center; gap: 8px; background: var(--c-surface); border: 1px solid var(--c-border); border-radius: 8px; padding: 8px 12px; color: var(--c-text-muted); }
@@ -3606,6 +3779,10 @@ const CSS = `
 .ft-progress-fill { height: 100%; border-radius: 3px; }
 .ft-card-progress { display: flex; flex-direction: column; gap: 4px; }
 .ft-card-progress-label { font-size: 10.5px; color: var(--c-text-muted); font-family: ui-monospace, monospace; }
+.ft-card-summary { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.ft-card-summary-text { margin: 0; font-size: 12px; line-height: 1.45; color: var(--c-text-muted); white-space: pre-line; }
+.ft-card-summary-clamped { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.ft-card-summary-toggle { background: none; border: none; padding: 0; font-size: 11.5px; color: var(--c-accent); cursor: pointer; font-family: inherit; }
 .ft-card-bottom { display: flex; justify-content: space-between; align-items: flex-end; gap: 8px; }
 .ft-card-dates { font-size: 10.5px; color: var(--c-text-muted); white-space: nowrap; }
 .ft-card-quickrow { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -3739,7 +3916,11 @@ const CSS = `
 .ft-auth-switch { justify-content: center; }
 
 @media (max-width: 720px) {
-  .ft-main { padding: 14px 14px 30px; }
+  .ft-main { padding: 14px 14px calc(30px + env(safe-area-inset-bottom)); }
   .ft-form-grid, .ft-form-grid-3 { grid-template-columns: 1fr; }
+  .ft-brand { display: none; }
+  .ft-nav-item { padding: 0 10px; font-size: 0; gap: 0; flex-shrink: 0; }
+  .ft-nav-item svg { width: 20px; height: 20px; }
+  .ft-nav-item-active { border-bottom-width: 2px; }
 }
 `;
