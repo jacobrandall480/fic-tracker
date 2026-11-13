@@ -4,68 +4,64 @@ A personal AO3 reading tracker: word counts, reading progress, series, collectio
 one-click import straight from AO3 — no manual data entry. Built on React + Firebase, deployed on
 Cloudflare Pages.
 
-- **Live data, synced everywhere** — sign in with the same account on any device, everything syncs
-  in real time.
-- **Reading statuses**: Unread, Currently Reading, Caught Up, Completed, On Hold, Abandoned.
-  "Caught Up" is specifically for a WIP you're fully read up on — it won't clutter your Currently
-  Reading list, but it's still easy to pull up and check for updates later.
-- **Series & collections**, with automatic series-membership linking on import.
-- **Duplicate detection** on import (matches by AO3 work ID first, falling back to title+author),
-  plus a "Possible duplicates" finder for anything that slipped through before.
-- **Undo** — every status change, edit, and import is reversible from a Recent Changes panel, on
-  top of a 30-day Trash for deletions.
-- **Stats**: words read, top fandoms/ships/tags, open WIPs to check on.
-- **Locked/restricted fics**: save your AO3 login once in Settings and the app signs in
-  automatically to fetch details for works that require it. Your password is encrypted before
-  being stored and is never shared with other accounts.
+- **Live data, synced everywhere** — sign in with the same email/password on any device and
+  everything syncs in real time.
+- **Reading statuses**: Unread, Currently Reading, Completed, On Hold, Abandoned. For a WIP you're
+  up to date on, the card's **Caught up** button marks it Completed with your progress set to the
+  latest posted chapter; if new chapters show up the next time the fic's stats are refreshed, it
+  flips back to Currently Reading on its own.
+- **Fic status** (Complete / WIP / Hiatus) — a work with an unknown chapter total (`N/?`) is
+  imported as a WIP.
+- **Series & collections**, with automatic series linking on import, plus a **Recs** tab and a
+  **Favorite authors** list.
+- **Duplicate detection** on every import path (matches by AO3 work ID first, then exact link,
+  then title + author). When something you're adding is already in your library, you're offered a
+  stats refresh instead of a re-add.
+- **30-day Trash** for deletions — restore or delete forever from the Trash icon in the nav (only
+  shown when Trash isn't empty).
+- **Stats**: words read, top fandoms/ships/tags, and WIPs to check on.
+- **Expandable summaries** on each card.
+- **Locked/restricted fics** are reported as locked — fill those in manually. (The server-side
+  functions still contain an AO3 sign-in fallback, but the current app doesn't send credentials to
+  it — see [AO3_LOGIN_SETUP.md](./AO3_LOGIN_SETUP.md).)
+
 ## Using it on your computer
 
 ### Adding fics from AO3
 
-Open **Settings** (gear icon, top right) — there are three buttons to drag to your bookmarks bar:
+Open **Settings** (gear icon, top right). There are two buttons to drag to your bookmarks bar:
 
-- **Add to Library** — go to Settings, drag the button to your bookmarks bar. On any AO3 **work
-  page**, click it: it reads the title, fandoms, rating, word count, dates, chapters, series, etc.
-  straight off the page (no extra request to AO3) and opens the app with the Add form pre-filled.
-  Review and hit Save.
+- **Add to Library** — on any AO3 **work page**, click it: it reads the title, fandoms, rating,
+  word count, dates, chapters, series, summary, etc. straight off the page (no extra request to
+  AO3) and opens the app with the Add form pre-filled. Review and hit Save. If it can't read the
+  page, it falls back to having the server fetch the work instead.
 - **Add Page to Library** — same idea, but for a whole **series page, collection, search results,
-  or tag page** — anywhere AO3 shows a list of work blurbs. Click it and you get a review panel
-  listing every work on that page, with checkboxes to pick which to add, and duplicates
-  auto-detected and offered a stats refresh instead of a re-add. Paginated pages only import the
-  current page — click through page by page for more.
-- **Update Progress** — drag it too, then click it while you're actually **reading a chapter** on
-  AO3 (chapter-by-chapter view — on AO3, Preferences → uncheck "Show entire work at once"). It
-  matches the fic by AO3 link, sets your reading progress to that chapter, and saves the exact
-  chapter URL so the fic's title in your library opens straight back to where you left off next
-  time. Only updates fics already in your library — add the fic first if it isn't there yet.
-  - Marking a fic **Completed** resets that saved link back to chapter 1 for next time; marking it
-    **Caught Up** leaves it exactly where it is, since the fic itself isn't done yet.
-  - If it can't tell which chapter you're on (e.g. you're viewing the "entire work" on one page,
-    or AO3's markup trips up detection), it still opens the app and saves the chapter link, but
-    leaves your chapter *count* untouched rather than guessing — you'll get a heads-up toast so you
-    can double check it.
+  or tag page** — anywhere AO3 shows a list of work blurbs. You get a review panel listing every
+  work on that page, with checkboxes to pick which to add; duplicates are auto-detected and offered
+  a stats refresh instead of a re-add. Paginated pages only import the current page — click
+  through page by page for more.
 
-**Drag these buttons to your bookmarks bar — don't click them on the Fic Tracker site itself**,
+**Drag these buttons to your bookmarks bar — don't click them on the Fic Tracker site itself**;
 they only do something on an actual AO3 page.
+
+You can also click **Add fic** and paste an AO3 link to have it fetched server-side, or use
+**Add from AO3 series** on the Series tab to pull in every work in a series by its link.
 
 ### Other ways to get data in
 
-- **Import CSV** (Settings) — for AO3's own export format (bookmarks/marked-for-later CSV
-  exports) or Goodreads-style shelf exports.
-- **Import JSON** (Settings) — Fic Tracker's own backup format; also merges/updates existing
-  entries by matching AO3 link or title+author, same duplicate-safe logic as everything else.
-- **Export JSON** (Settings) — full backup of your library + lists (series/collections),
-  any time.
+- **Import CSV** (Settings) — needs a `link` (or `url`) column; AO3 work/series/collection links
+  all work. Title, author, fandoms, relationships, characters, tags, warnings, rating, word count,
+  chapters, summary and series columns are used when present, and an optional `source`/`shelf`
+  column becomes a Collection. [`ao3_scraper_rich.js`](./ao3_scraper_rich.js) is a helper script
+  that produces a CSV in this shape from AO3 listing pages.
+- **Import JSON** (Settings) — Fic Tracker's own backup format. Choose **Merge** (adds new fics,
+  optionally refreshes AO3 stats on matching ones, never removes anything) or **Replace
+  everything** (makes your library match the file; anything not in it goes to Trash).
+- **Export JSON** (Settings) — full backup of your library plus lists (series, collections,
+  favorite authors), any time.
 
-### Duplicates & undo
-
-If two entries turn out to be the same fic, open the **duplicates icon** in the nav (only shows up
-when there's something to review) — pick which copy to keep, and its series links, collections,
-and tags absorb the other's before it's moved to Trash.
-
-Made a mistake — wrong status, bad edit, bad import? Click **Undo** on the toast that pops up
-after any change, or open the **Recent Changes** icon in the nav for a list of the last 20 actions
-with individual Undo buttons.
+**Clear all data** (Settings) moves every fic to Trash and permanently deletes your saved
+collections/series/authors — export a backup first.
 
 ## Using it on iPhone
 
@@ -76,19 +72,19 @@ You'll get a proper icon that launches full-screen with no browser chrome.
 
 ### 2. Set up the AO3 shortcuts (one-time, ~5 minutes each)
 
-Regular bookmarklets don't work well on iOS Safari, so importing and progress updates instead run
-through the **Shortcuts** app, using its "Run JavaScript on Webpage" action — same logic as the
-desktop bookmarklets, just triggered from the Share Sheet instead of a bookmarks bar.
+Regular bookmarklets don't work well on iOS Safari, so importing instead runs through the
+**Shortcuts** app, using its "Run JavaScript on Webpage" action — same logic as the desktop
+bookmarklets, just triggered from the Share Sheet instead of a bookmarks bar.
 
-Three scripts live in this repo for this:
+Two scripts in this repo are used for this:
 - [`ios-shortcut-add-fic.js`](./ios-shortcut-add-fic.js) — single work page
 - [`ios-shortcut-add-bulk.js`](./ios-shortcut-add-bulk.js) — series/collection/search-results pages
-- [`ios-shortcut-update-progress.js`](./ios-shortcut-update-progress.js) — while reading a chapter,
-  updates your progress and saves the chapter link (same logic as the desktop "Update Progress"
-  bookmarklet — see above for what it does and its fallback behavior when it can't detect a chapter
-  number)
 
-**All three scripts have your site's URL hardcoded near the top** (`var ORIGIN = 'https://fic-tracker.pages.dev';`)
+> [`ios-shortcut-update-progress.js`](./ios-shortcut-update-progress.js) is also in the repo, but
+> the current app doesn't handle the `?updateProgress=` link it produces, so it won't do anything
+> yet. Skip it for now.
+
+**Both scripts have your site's URL hardcoded near the top** (`var ORIGIN = 'https://fic-tracker.pages.dev';`)
 — edit that line first if your deployment uses a different URL.
 
 **Build the shortcut:**
@@ -103,30 +99,27 @@ Three scripts live in this repo for this:
 4. Add action **Open URLs** → set its input to the output of the **URL** action from step 3 (not
    directly to the JavaScript Result).
 5. Rename the shortcut (tap the name/settings at top): **"Add to Fic Tracker"**
-   (**"Bulk Add to Fic Tracker"** for the bulk script, **"Update Reading Progress"** for the
-   progress script).
+   (**"Bulk Add to Fic Tracker"** for the bulk script).
 6. Tap the **ⓘ** settings icon → enable **"Show in Share Sheet"** → under **Share Sheet Types**,
    restrict to **Safari web pages**.
 
-Repeat the whole thing for each script to get all three shortcuts.
+Repeat for the second script.
 
-**Using it:** on an AO3 work page (or a chapter you're reading, or a series/collection page) in
-Safari → **Share** → tap the matching shortcut. It scrapes/reads the page and opens the right
-screen in the app pre-filled — review and Save (import), or it just applies (progress update, no
-review step needed).
+**Using it:** on an AO3 work page (or a series/collection page) in Safari → **Share** → tap the
+matching shortcut. It reads the page and opens the app with the Add form or bulk-import review
+panel pre-filled — review and Save.
 
 **Testing/debugging a shortcut:** "Run JavaScript on Webpage" only does anything when triggered
 from the Share Sheet on a real webpage — the ▶️ Play button in the Shortcuts editor won't run it
-properly. To inspect exactly what the script produced without committing to opening it, add a
-**Quick Look** action between the JavaScript step and the URL step (temporarily) — it'll pop up
-the raw scraped/encoded text so you can check it's non-empty before it gets opened.
+properly. To inspect exactly what the script produced, add a **Quick Look** action between the
+JavaScript step and the URL step (temporarily) — it'll show the raw encoded text so you can check
+it's non-empty before it gets opened.
 
 **Known limitation:** iOS won't hand off a regular link to an installed Home Screen app — only
-true native apps can register for that (this needs Apple's Universal Links, which requires owning
-the linked domain; archiveofourown.org isn't yours to configure that way). So tapping a shortcut
-opens the app in **Safari**, not your installed app icon, even though it's the same account and
-the same data. Cosmetic only — switch to the Home Screen app afterward and the update will already
-be there.
+true native apps can register for that (via Apple's Universal Links, which requires owning the
+linked domain). So a shortcut opens the app in **Safari**, not your Home Screen icon, even though
+it's the same account and the same data. Cosmetic only — switch to the Home Screen app afterward
+and the new fic will already be there.
 
 ## Deploying / self-hosting
 
@@ -136,64 +129,51 @@ be there.
 2. Install the CLI: `npm install -g wrangler`
 3. `wrangler login` (opens your browser to authorize).
 4. `npm install` in this project folder.
+5. Using your own Firebase project instead of the one in `src/firebase.js`? Follow
+   [FIREBASE_SETUP.md](./FIREBASE_SETUP.md) first.
 
 ### Deploy
+
+```
+npm run deploy
+```
+
+That's shorthand for:
 
 ```
 npm run build
 wrangler pages deploy dist --project-name=fic-tracker --branch=production
 ```
 
-Run this **from the project root** (`functions/` and `dist/` need to be siblings) — Wrangler picks
-up `functions/` automatically. First run creates the Pages project; every run after redeploys to
-it. It prints your live URL (`https://fic-tracker-xxx.pages.dev` or similar).
+Run it **from the project root** (`functions/` and `dist/` need to be siblings) — Wrangler picks
+up `functions/` automatically. The first run creates the Pages project; every run after redeploys
+to it. It prints your live URL (`https://fic-tracker-xxx.pages.dev` or similar).
 
 **The `--branch=production` flag matters** if this project isn't connected to a GitHub repo on
 Cloudflare's side (Pages → project → Settings → Build → "Git repository" shows "Connect" rather
 than a linked repo). Without it, Wrangler tags the deploy with whatever your local git branch
 happens to be, which can land it as a Preview deployment instead of Production — meaning your
 main domain (`fic-tracker.pages.dev`) silently stops updating even though the deploy itself
-succeeds. Check **Deployments** tab → **Production** section to confirm the domain is pointing at
-your latest deploy, not an old one, if pages ever seem to be serving stale content after a deploy.
+succeeds. If pages ever seem stale after a deploy, check **Deployments** → **Production** to
+confirm the domain points at your latest deploy.
 
 If you're not using the default `fic-tracker.pages.dev` URL, update `ORIGIN` in
-`ios-shortcut-add-fic.js`, `ios-shortcut-add-bulk.js`, and `ios-shortcut-update-progress.js` to
-match.
+`ios-shortcut-add-fic.js` and `ios-shortcut-add-bulk.js` to match. (The desktop bookmarklets pick
+up your site's URL automatically.)
+
+The app is a PWA with a service worker (`vite-plugin-pwa`, auto-update). If an installed copy keeps
+showing an old version, bump the `revision` in `vite.config.js` and redeploy.
 
 ### Secrets
 
-```
-wrangler pages secret put AO3_USERNAME --project-name=fic-tracker
-wrangler pages secret put AO3_PASSWORD --project-name=fic-tracker
-wrangler pages secret put ENCRYPTION_KEY --project-name=fic-tracker
-wrangler pages secret put OWNER_UID --project-name=fic-tracker
-```
-
-- **`AO3_USERNAME` / `AO3_PASSWORD`** (optional) — your own AO3 login, used automatically
-  whenever *you* (matched via `OWNER_UID` below) hit a locked/restricted fic. Not required if you
-  don't need this for yourself specifically.
-- **`ENCRYPTION_KEY`** (required if you want other users to be able to save their own AO3 login
-  in Settings) — encrypts saved passwords before they're written to Firestore. Generate once with:
-```
-node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
-```
-**Never change this once anyone has saved credentials** — doing so makes every saved password
-  permanently undecryptable, and everyone would need to re-save.
-- **`OWNER_UID`** (optional, pairs with `AO3_USERNAME`/`AO3_PASSWORD`) — your own Firebase Auth
-  UID (Firebase Console → Authentication → Users → your row), so the app recognizes *you*
-  specifically and skips the Settings prompt for your own account.
-
-If this project has a Preview environment you also test against (e.g. a separate git branch),
-set all four secrets there too, with the **same values** — append `--env preview` to each command
-above.
-
-Or set any of these via the dashboard: your project → **Settings → Variables and secrets**.
-
+None are required for the app to work. The only secrets the functions read relate to the AO3
+sign-in fallback, which the current app doesn't use — see [AO3_LOGIN_SETUP.md](./AO3_LOGIN_SETUP.md)
+for what they are if you want them in place.
 
 ### Firebase
 
 `src/firebase.js` ships with the project's public web config already in the code — that's
-expected, Firebase access is controlled by security rules, not by hiding this config. Auth/sync
+expected; Firebase access is controlled by security rules, not by hiding this config. Auth/sync
 work the same in any environment (local dev, Docker, production) without extra setup.
 
 ### Local dev / Docker
@@ -204,30 +184,38 @@ docker run -p 8788:8788 fic-tracker
 ```
 
 Then open http://localhost:8788 — the app and the `/fetch-fic`, `/fetch-series`,
-`/fetch-collection-bookmarks` functions all run from inside the container, same as Wrangler on
-Cloudflare.
+`/fetch-collection-bookmarks` and `/encrypt-ao3-password` functions all run inside the container
+via `wrangler pages dev`, same as on Cloudflare.
 
-Or with docker-compose (also wires up the optional AO3 login fallback):
+Or with docker-compose:
 
 ```
 cp .dev.vars.example .dev.vars   # fill in AO3_USERNAME/AO3_PASSWORD, or leave blank
 docker compose up --build
 ```
 
+`npm run dev` also works for frontend-only work (Vite dev server), but the `/fetch-*` functions
+won't be available there — use Docker or `wrangler pages dev` for those.
+
 ## Repo structure
 
 ```
+src/main.jsx                         — React entry point
 src/App.jsx                          — the whole app (single-file React component)
 src/firebase.js                      — Firebase config + all read/write helpers
-src/components/AO3CredentialsSettings.jsx — UI for saving/removing a per-user AO3 login
+src/components/AO3CredentialsSettings.jsx — per-user AO3 login UI (not currently used by App.jsx)
 functions/fetch-fic.js               — server-side single-work fetch (Cloudflare Pages Function)
 functions/fetch-series.js            — server-side series fetch
-functions/fetch-collection-bookmarks.js
+functions/fetch-collection-bookmarks.js — server-side collection fetch
 functions/encrypt-ao3-password.js    — encrypts a password before it's saved to Firestore
 functions/lib/crypto.js              — AES-GCM encrypt/decrypt helpers, keyed by ENCRYPTION_KEY
-public/manifest.webmanifest          — PWA manifest
-public/apple-touch-icon.png, icon-*.png
+public/manifest.webmanifest, icon-192.png, icon-512.png — PWA manifest + icons
+vite.config.js                       — Vite + PWA (service worker) config
 ios-shortcut-add-fic.js              — paste into the iOS "Add to Fic Tracker" shortcut
 ios-shortcut-add-bulk.js             — paste into the iOS "Bulk Add to Fic Tracker" shortcut
-ios-shortcut-update-progress.js      — paste into the iOS "Update Reading Progress" shortcut
+ios-shortcut-update-progress.js      — progress-update shortcut (not handled by the current app)
+ao3_scraper_rich.js                  — helper that scrapes AO3 listing pages into an importable CSV
+Dockerfile, docker-compose.yml, .dev.vars.example — local dev / self-hosting
+FIREBASE_SETUP.md                    — setting up your own Firebase project
+AO3_LOGIN_SETUP.md                   — the (currently unused) AO3 sign-in fallback
 ```
