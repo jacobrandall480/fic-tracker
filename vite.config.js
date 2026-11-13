@@ -18,7 +18,7 @@ export default defineConfig({
     },
     workbox: {
       globPatterns: ["**/*.{js,css,html,svg,png,woff2}"],
-      additionalManifestEntries: [{ url: "/", revision: "v55" }],
+      additionalManifestEntries: [{ url: "/", revision: "v56" }],
       runtimeCaching: [{ urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i, handler: "CacheFirst", options: { cacheName: "google-fonts-cache" } }],
     },
   })],

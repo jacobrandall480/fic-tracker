@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "deploy": "vite build && wrangler pages deploy dist --project-name=fic-tracker --branch=production"
   },
   "dependencies": {
     "firebase": "^9.14.0",
